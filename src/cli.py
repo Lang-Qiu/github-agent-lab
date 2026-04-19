@@ -1,5 +1,7 @@
 """Typer CLI for local experimentation workflows."""
 
+from typing import Optional
+
 import typer
 
 from .workflows.apply_patch import PatchApplyError, run_apply_patch
@@ -95,10 +97,15 @@ def validate(
 @app.command("pr-draft")
 def pr_draft(
     task_id: str = typer.Argument(..., help="Task id from existing workflow artifacts."),
+    use_llm: bool = typer.Option(
+        False,
+        "--use-llm",
+        help="Use LLM mode for markdown draft generation with fallback to rule mode.",
+    ),
 ) -> None:
     """Generate minimal PR draft artifacts (JSON and Markdown)."""
     try:
-        message = run_pr_draft(task_id)
+        message = run_pr_draft(task_id, use_llm=use_llm)
     except PRDraftError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
@@ -109,7 +116,10 @@ def pr_draft(
 @app.command("run-task")
 def run_task_command(
     repo_url: str = typer.Argument(..., help="Target GitHub repository URL."),
-    task_id: str = typer.Argument(..., help="Task id to run through all workflow steps."),
+    task_id: Optional[str] = typer.Argument(
+        None,
+        help="Optional task id. If omitted, run-task uses the first candidate task.",
+    ),
 ) -> None:
     """Run analyze->plan->patch->apply->validate->pr-draft end-to-end."""
     try:

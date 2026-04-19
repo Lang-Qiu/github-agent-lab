@@ -25,3 +25,6 @@ include = ["src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "llm_integration: tests that perform real LLM API calls",
+]

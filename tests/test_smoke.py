@@ -10,6 +10,12 @@ from src.cli import app
 runner = CliRunner()
 
 
+@pytest.fixture(autouse=True)
+def _disable_github_remote_in_default_tests(monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_API_BASE_URL", raising=False)
+
+
 def test_help_command_runs() -> None:
     result = runner.invoke(app, ["--help"])
 
@@ -38,12 +44,16 @@ def test_analyze_prepares_local_summary(tmp_path: Path, monkeypatch) -> None:
     assert data["repo"] == "repo"
     assert data["workspace_dir"] == "playground/repos/owner/repo"
     assert data["workspace_initialized"] == "created"
+    assert data["repo_metadata"] is None
+    assert data["sample_open_issues"] == []
     assert data["status"] == "prepared"
 
     candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
     assert candidate_data["repo_url"] == repo_url
     assert candidate_data["owner"] == "owner"
     assert candidate_data["repo"] == "repo"
+    assert candidate_data["issue_context_used"] is False
+    assert candidate_data["fallback_triggered"] is True
     assert isinstance(candidate_data["tasks"], list)
     assert len(candidate_data["tasks"]) > 0
     for task in candidate_data["tasks"]:
@@ -52,13 +62,136 @@ def test_analyze_prepares_local_summary(tmp_path: Path, monkeypatch) -> None:
         assert "type" in task
         assert "priority" in task
         assert "status" in task
+        assert "source" in task
+        assert task["source"] == "template"
+        assert "issue_number" not in task
 
     assert "Local analysis preparation complete" in result.stdout
     assert "owner: owner" in result.stdout
     assert "repo: repo" in result.stdout
     assert "workspace_initialized: created" in result.stdout
     assert "candidate_tasks_count:" in result.stdout
+    assert "candidate_issue_context_used: false" in result.stdout
+    assert "candidate_fallback_triggered: true" in result.stdout
+    assert "github_remote_used: false" in result.stdout
+    assert "github_fallback_triggered: false" in result.stdout
     assert "status: prepared" in result.stdout
+
+
+def test_analyze_includes_github_remote_data_when_token_and_client_available(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            assert owner == "owner"
+            assert repo == "repo"
+            return {
+                "full_name": "owner/repo",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 5,
+            }
+
+        def get_open_issues(self, owner: str, repo: str, limit: int = 3) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 1, "title": "Issue one", "state": "open"},
+                {"number": 2, "title": "Issue two", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
+
+    result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    summary_file = tmp_path / "playground" / "outputs" / "repo_summary.json"
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+
+    assert result.exit_code == 0
+    assert summary_file.exists()
+    assert candidate_file.exists()
+
+    data = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert data["repo_metadata"] == {
+        "full_name": "owner/repo",
+        "description": "dummy repo",
+        "default_branch": "main",
+        "open_issues_count": 5,
+    }
+    assert data["sample_open_issues"] == [
+        {"number": 1, "title": "Issue one", "state": "open"},
+        {"number": 2, "title": "Issue two", "state": "open"},
+    ]
+
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    assert candidate_data["issue_context_used"] is True
+    assert candidate_data["fallback_triggered"] is False
+    assert isinstance(candidate_data["tasks"], list)
+    assert len(candidate_data["tasks"]) == 2
+    assert candidate_data["tasks"][0]["source"] == "github_issue"
+    assert candidate_data["tasks"][0]["issue_number"] == 1
+    assert candidate_data["tasks"][1]["source"] == "github_issue"
+    assert candidate_data["tasks"][1]["issue_number"] == 2
+
+    assert "github_remote_used: true" in result.stdout
+    assert "github_fallback_triggered: false" in result.stdout
+    assert "candidate_issue_context_used: true" in result.stdout
+    assert "candidate_fallback_triggered: false" in result.stdout
+
+
+def test_analyze_gracefully_degrades_when_github_read_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyError(ValueError):
+        pass
+
+    def _raise_failure():
+        raise DummyError("github read failed")
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        _raise_failure,
+    )
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClientError",
+        DummyError,
+    )
+
+    result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    summary_file = tmp_path / "playground" / "outputs" / "repo_summary.json"
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+
+    assert result.exit_code == 0
+    assert summary_file.exists()
+    assert candidate_file.exists()
+
+    data = json.loads(summary_file.read_text(encoding="utf-8"))
+    assert data["repo_metadata"] is None
+    assert data["sample_open_issues"] == []
+
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    assert candidate_data["issue_context_used"] is False
+    assert candidate_data["fallback_triggered"] is True
+    assert isinstance(candidate_data["tasks"], list)
+    assert len(candidate_data["tasks"]) > 0
+    for task in candidate_data["tasks"]:
+        assert task["source"] == "template"
+        assert "issue_number" not in task
+
+    assert "github_remote_used: false" in result.stdout
+    assert "github_fallback_triggered: true" in result.stdout
+    assert "candidate_issue_context_used: false" in result.stdout
+    assert "candidate_fallback_triggered: true" in result.stdout
+    assert "github read failed" in result.stdout
 
 
 def test_analyze_reuses_existing_workspace(tmp_path: Path, monkeypatch) -> None:
@@ -405,10 +538,12 @@ def test_pr_draft_generates_json_and_markdown_for_valid_task_id(
     pr_result = runner.invoke(app, ["pr-draft", task_id])
     pr_json = tmp_path / "playground" / "outputs" / "pr_draft.json"
     pr_md = tmp_path / "playground" / "outputs" / "pr_draft.md"
+    pr_llm_md = tmp_path / "playground" / "outputs" / "pr_draft_llm.md"
 
     assert pr_result.exit_code == 0
     assert pr_json.exists()
     assert pr_md.exists()
+    assert not pr_llm_md.exists()
 
     payload = json.loads(pr_json.read_text(encoding="utf-8"))
     assert payload["task_id"] == task_id
@@ -424,6 +559,8 @@ def test_pr_draft_generates_json_and_markdown_for_valid_task_id(
     assert task_id in markdown
 
     assert "PR draft generated" in pr_result.stdout
+    assert "used_llm: false" in pr_result.stdout
+    assert "fallback_triggered: false" in pr_result.stdout
     assert "pr_draft.json" in pr_result.stdout
     assert "pr_draft.md" in pr_result.stdout
 
@@ -449,6 +586,51 @@ def test_pr_draft_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert "Error:" in result.stdout
     assert "task_id not found" in result.stdout
     assert "Traceback" not in result.stdout
+
+
+def test_pr_draft_use_llm_falls_back_when_llm_call_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+    assert runner.invoke(app, ["validate", task_id]).exit_code == 0
+
+    monkeypatch.setenv("LLM_API_KEY", "dummy")
+    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
+    monkeypatch.setenv("LLM_MODEL", "dummy-model")
+
+    def _raise_llm_error(*args, **kwargs):
+        raise RuntimeError("llm failure")
+
+    monkeypatch.setattr(
+        "src.llm_client.LLMClient.generate_pr_draft",
+        _raise_llm_error,
+        raising=False,
+    )
+
+    result = runner.invoke(app, ["pr-draft", task_id, "--use-llm"])
+    pr_json = tmp_path / "playground" / "outputs" / "pr_draft.json"
+    pr_md = tmp_path / "playground" / "outputs" / "pr_draft.md"
+    pr_llm_md = tmp_path / "playground" / "outputs" / "pr_draft_llm.md"
+
+    assert result.exit_code == 0
+    assert pr_json.exists()
+    assert pr_md.exists()
+    assert not pr_llm_md.exists()
+    assert "used_llm: false" in result.stdout
+    assert "fallback_triggered: true" in result.stdout
+    assert "llm failure" in result.stdout
 
 
 def test_run_task_executes_full_pipeline_for_valid_input(
@@ -489,6 +671,38 @@ def test_run_task_executes_full_pipeline_for_valid_input(
     assert "Run task completed" in result.stdout
     assert "status: completed" in result.stdout
     assert "run_task_result.json" in result.stdout
+
+
+def test_run_task_cli_uses_typer_compatible_optional_annotation() -> None:
+    cli_source = Path("src/cli.py").read_text(encoding="utf-8")
+
+    assert "task_id: str | None" not in cli_source
+
+
+def test_run_task_auto_selects_first_candidate_task_when_task_id_omitted(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["run-task", "https://github.com/owner/repo"])
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+
+    assert result.exit_code == 0
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == "repo-task-001"
+    assert payload["status"] == "completed"
+    assert payload["passed"] is True
+    assert payload["steps_completed"] == [
+        "analyze",
+        "plan",
+        "patch",
+        "apply",
+        "validate",
+        "pr-draft",
+    ]
 
 
 def test_run_task_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
