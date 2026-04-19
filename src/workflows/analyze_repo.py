@@ -66,6 +66,44 @@ def prepare_local_analysis(repo_url: str) -> dict[str, str]:
     }
 
 
+def discover_candidate_tasks(summary_file: Path) -> dict[str, object]:
+    summary = json.loads(summary_file.read_text(encoding="utf-8"))
+    owner = str(summary["owner"])
+    repo = str(summary["repo"])
+    repo_url = str(summary["repo_url"])
+
+    tasks = [
+        {
+            "id": f"{repo}-task-001",
+            "title": "Review repository contribution guide",
+            "type": "docs",
+            "priority": "medium",
+            "status": "todo",
+        },
+        {
+            "id": f"{repo}-task-002",
+            "title": "Identify candidate smoke test improvements",
+            "type": "test",
+            "priority": "high",
+            "status": "todo",
+        },
+        {
+            "id": f"{repo}-task-003",
+            "title": f"Prepare first patch plan for {owner}/{repo}",
+            "type": "planning",
+            "priority": "medium",
+            "status": "todo",
+        },
+    ]
+
+    return {
+        "repo_url": repo_url,
+        "owner": owner,
+        "repo": repo,
+        "tasks": tasks,
+    }
+
+
 def run_analyze_repo(repo_url: str) -> str:
     result = prepare_local_analysis(repo_url)
 
@@ -77,6 +115,14 @@ def run_analyze_repo(repo_url: str) -> str:
         encoding="utf-8",
     )
 
+    candidate_payload = discover_candidate_tasks(summary_file)
+    candidate_file = output_dir / "candidate_tasks.json"
+    candidate_file.write_text(
+        json.dumps(candidate_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    task_count = len(candidate_payload["tasks"])
+
     return (
         "Local analysis preparation complete.\n"
         f"repo_url: {result['repo_url']}\n"
@@ -85,5 +131,7 @@ def run_analyze_repo(repo_url: str) -> str:
         f"workspace_dir: {result['workspace_dir']}\n"
         f"workspace_initialized: {result['workspace_initialized']}\n"
         f"status: {result['status']}\n"
-        f"summary_file: {summary_file.as_posix()}"
+        f"summary_file: {summary_file.as_posix()}\n"
+        f"candidate_tasks_file: {candidate_file.as_posix()}\n"
+        f"candidate_tasks_count: {task_count}"
     )

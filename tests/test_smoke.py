@@ -23,10 +23,12 @@ def test_analyze_prepares_local_summary(tmp_path: Path, monkeypatch) -> None:
     repo_url = "https://github.com/owner/repo"
     result = runner.invoke(app, ["analyze", repo_url])
     summary_file = tmp_path / "playground" / "outputs" / "repo_summary.json"
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
     workspace_path = tmp_path / "playground" / "repos" / "owner" / "repo"
 
     assert result.exit_code == 0
     assert summary_file.exists()
+    assert candidate_file.exists()
     assert workspace_path.exists()
     assert workspace_path.is_dir()
 
@@ -38,10 +40,24 @@ def test_analyze_prepares_local_summary(tmp_path: Path, monkeypatch) -> None:
     assert data["workspace_initialized"] == "created"
     assert data["status"] == "prepared"
 
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    assert candidate_data["repo_url"] == repo_url
+    assert candidate_data["owner"] == "owner"
+    assert candidate_data["repo"] == "repo"
+    assert isinstance(candidate_data["tasks"], list)
+    assert len(candidate_data["tasks"]) > 0
+    for task in candidate_data["tasks"]:
+        assert "id" in task
+        assert "title" in task
+        assert "type" in task
+        assert "priority" in task
+        assert "status" in task
+
     assert "Local analysis preparation complete" in result.stdout
     assert "owner: owner" in result.stdout
     assert "repo: repo" in result.stdout
     assert "workspace_initialized: created" in result.stdout
+    assert "candidate_tasks_count:" in result.stdout
     assert "status: prepared" in result.stdout
 
 
@@ -101,3 +117,50 @@ def test_analyze_rejects_invalid_urls(
     assert expected_error in result.stdout
     assert "Traceback" not in result.stdout
     assert not (tmp_path / "playground" / "outputs").exists()
+
+
+def test_plan_generates_task_plan_for_valid_task_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    plan_result = runner.invoke(app, ["plan", task_id])
+    task_plan_file = tmp_path / "playground" / "outputs" / "task_plan.json"
+
+    assert plan_result.exit_code == 0
+    assert task_plan_file.exists()
+
+    task_plan = json.loads(task_plan_file.read_text(encoding="utf-8"))
+    assert task_plan["task_id"] == task_id
+    assert task_plan["title"] == candidate_data["tasks"][0]["title"]
+    assert "goal" in task_plan
+    assert "proposed_changes" in task_plan
+    assert "target_files" in task_plan
+    assert "validation_steps" in task_plan
+    assert "risk_level" in task_plan
+    assert "status" in task_plan
+
+    assert "Task plan generated" in plan_result.stdout
+    assert "task_plan.json" in plan_result.stdout
+
+
+def test_plan_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    result = runner.invoke(app, ["plan", "non-existent-task-id"])
+
+    assert result.exit_code == 1
+    assert "Error:" in result.stdout
+    assert "task_id not found" in result.stdout
+    assert "Traceback" not in result.stdout
