@@ -44,6 +44,37 @@ def _build_llm_prompt(
     )
 
 
+def _resolve_rule_context(
+    task_plan: dict[str, object],
+    patch_preview: dict[str, object],
+    patch_apply_result: dict[str, object],
+    validation_result: dict[str, object],
+) -> tuple[str, int | None, bool, bool]:
+    payloads = [task_plan, patch_preview, patch_apply_result, validation_result]
+
+    sources = [str(item.get("source", "template")) for item in payloads]
+    issue_flags = [bool(item.get("issue_context_used", False)) for item in payloads]
+
+    issue_numbers_raw = [item.get("issue_number") for item in payloads]
+    issue_numbers = [num for num in issue_numbers_raw if isinstance(num, int)]
+
+    issue_number: int | None = None
+    if issue_numbers and len(issue_numbers) == len(payloads):
+        first = issue_numbers[0]
+        if all(num == first for num in issue_numbers):
+            issue_number = first
+
+    issue_context_used = (
+        all(source == "github_issue" for source in sources)
+        and all(issue_flags)
+        and issue_number is not None
+    )
+    fallback_triggered = not issue_context_used
+    source = "github_issue" if issue_context_used else "template"
+
+    return source, issue_number, issue_context_used, fallback_triggered
+
+
 def run_pr_draft(task_id: str, use_llm: bool = False) -> str:
     output_dir = Path("playground") / "outputs"
     task_plan = _read_json_file(
@@ -68,18 +99,31 @@ def run_pr_draft(task_id: str, use_llm: bool = False) -> str:
     _ensure_task_id(patch_apply_result, task_id)
     _ensure_task_id(validation_result, task_id)
 
+    source, issue_number, issue_context_used, rule_fallback_triggered = _resolve_rule_context(
+        task_plan,
+        patch_preview,
+        patch_apply_result,
+        validation_result,
+    )
+
     passed = bool(validation_result.get("passed", False))
     status = "ready" if passed else "needs_attention"
     risks = [
         "Validation did not fully pass. Review missing files before opening PR."
     ] if not passed else ["Low risk for this minimal local draft."]
 
+    if issue_context_used and issue_number is not None:
+        summary = (
+            f"Prepare issue-aware PR for issue #{issue_number} "
+            f"using local generated artifacts."
+        )
+    else:
+        summary = f"Prepare PR for task {task_id} using local generated artifacts."
+
     draft = {
         "task_id": task_id,
         "title": str(task_plan.get("title", "Untitled task")),
-        "summary": (
-            f"Prepare PR for task {task_id} using local generated artifacts."
-        ),
+        "summary": summary,
         "changes": {
             "target_files": list(patch_preview.get("target_files", [])),
             "planned_edits": list(patch_preview.get("planned_edits", [])),
@@ -92,7 +136,13 @@ def run_pr_draft(task_id: str, use_llm: bool = False) -> str:
         },
         "risks": risks,
         "status": status,
+        "source": source,
+        "issue_context_used": issue_context_used,
+        "fallback_triggered": rule_fallback_triggered,
     }
+
+    if issue_context_used and issue_number is not None:
+        draft["issue_number"] = issue_number
 
     draft_json_file = output_dir / "pr_draft.json"
     draft_md_file = output_dir / "pr_draft.md"
@@ -103,8 +153,19 @@ def run_pr_draft(task_id: str, use_llm: bool = False) -> str:
         encoding="utf-8",
     )
 
+    mode_label = "issue-aware" if issue_context_used else "template fallback"
+    issue_line = (
+        f"- issue: issue #{issue_number}\n" if issue_context_used and issue_number is not None else ""
+    )
+
     markdown = (
         "# PR Draft\n\n"
+        "## Context\n"
+        f"- mode: {mode_label}\n"
+        f"- source: {draft['source']}\n"
+        f"- issue_context_used: {draft['issue_context_used']}\n"
+        f"- fallback_triggered: {draft['fallback_triggered']}\n"
+        f"{issue_line}\n"
         f"## Task\n- task_id: {draft['task_id']}\n- title: {draft['title']}\n\n"
         f"## Summary\n{draft['summary']}\n\n"
         "## Changes\n"
@@ -149,6 +210,8 @@ def run_pr_draft(task_id: str, use_llm: bool = False) -> str:
         "PR draft generated.\n"
         f"task_id: {task_id}\n"
         f"status: {status}\n"
+        f"rule_issue_context_used: {'true' if issue_context_used else 'false'}\n"
+        f"rule_fallback_triggered: {'true' if rule_fallback_triggered else 'false'}\n"
         f"used_llm: {'true' if used_llm else 'false'}\n"
         f"fallback_triggered: {'true' if fallback_triggered else 'false'}\n"
         f"pr_draft_json: {draft_json_file.as_posix()}\n"

@@ -17,6 +17,72 @@ class RunTaskError(ValueError):
     """User-facing input error for run-task command."""
 
 
+def _read_json_if_exists(file_path: Path) -> dict[str, object] | None:
+    if not file_path.exists():
+        return None
+
+    return json.loads(file_path.read_text(encoding="utf-8"))
+
+
+def _extract_fallback_flag(payload: dict[str, object] | None) -> bool | None:
+    if payload is None:
+        return None
+
+    value = payload.get("fallback_triggered")
+    if isinstance(value, bool):
+        return value
+
+    return None
+
+
+def _build_run_task_context(output_dir: Path) -> dict[str, object]:
+    task_plan = _read_json_if_exists(output_dir / "task_plan.json")
+    patch_preview = _read_json_if_exists(output_dir / "patch_preview.json")
+    patch_apply_result = _read_json_if_exists(output_dir / "patch_apply_result.json")
+    validation_result = _read_json_if_exists(output_dir / "validation_result.json")
+    pr_draft = _read_json_if_exists(output_dir / "pr_draft.json")
+
+    payloads: list[dict[str, object]] = [
+        payload
+        for payload in [task_plan, patch_preview, patch_apply_result, validation_result, pr_draft]
+        if payload is not None
+    ]
+
+    issue_aware = False
+    issue_number: int | None = None
+    if len(payloads) == 5:
+        sources_ok = all(str(payload.get("source", "template")) == "github_issue" for payload in payloads)
+        flags_ok = all(bool(payload.get("issue_context_used", False)) for payload in payloads)
+        issue_numbers = [payload.get("issue_number") for payload in payloads]
+        if all(isinstance(number, int) for number in issue_numbers):
+            first = int(issue_numbers[0])
+            if all(int(number) == first for number in issue_numbers):
+                issue_number = first
+                issue_aware = sources_ok and flags_ok
+
+    source = "github_issue" if issue_aware else "template"
+
+    validation_passed: bool | None = None
+    if isinstance(validation_result, dict) and isinstance(validation_result.get("passed"), bool):
+        validation_passed = bool(validation_result.get("passed"))
+
+    fallback_summary = {
+        "planning": _extract_fallback_flag(task_plan),
+        "patch": _extract_fallback_flag(patch_preview),
+        "apply": _extract_fallback_flag(patch_apply_result),
+        "validate": _extract_fallback_flag(validation_result),
+        "pr_draft": _extract_fallback_flag(pr_draft),
+    }
+
+    return {
+        "source": source,
+        "issue_number": issue_number,
+        "issue_context_used": issue_aware,
+        "fallback_summary": fallback_summary,
+        "final_validation_passed": validation_passed,
+    }
+
+
 def _write_run_task_result(result: dict[str, object]) -> Path:
     output_dir = Path("playground") / "outputs"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -94,6 +160,7 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
         ValidationError,
         PRDraftError,
     ) as exc:
+        context = _build_run_task_context(output_dir)
         result = {
             "repo_url": repo_url,
             "task_id": resolved_task_id,
@@ -102,12 +169,18 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
             "passed": False,
             "status": "failed",
             "summary": f"Failed at step with error: {exc}",
+            "source": context["source"],
+            "issue_number": context["issue_number"],
+            "issue_context_used": context["issue_context_used"],
+            "fallback_summary": context["fallback_summary"],
+            "final_validation_passed": context["final_validation_passed"],
         }
         result_file = _write_run_task_result(result)
         raise RunTaskError(
             f"{exc}. run_task_result: {result_file.as_posix()}"
         ) from exc
 
+    context = _build_run_task_context(output_dir)
     result = {
         "repo_url": repo_url,
         "task_id": resolved_task_id,
@@ -116,13 +189,24 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
         "passed": True,
         "status": "completed",
         "summary": f"Completed run-task pipeline with {len(steps_completed)} steps.",
+        "source": context["source"],
+        "issue_number": context["issue_number"],
+        "issue_context_used": context["issue_context_used"],
+        "fallback_summary": context["fallback_summary"],
+        "final_validation_passed": context["final_validation_passed"],
     }
     result_file = _write_run_task_result(result)
+
+    issue_number_text = str(context["issue_number"]) if context["issue_number"] is not None else "none"
+    fallback_summary_text = json.dumps(context["fallback_summary"], ensure_ascii=False)
 
     return (
         "Run task completed.\n"
         f"repo_url: {repo_url}\n"
         f"task_id: {resolved_task_id}\n"
         "status: completed\n"
+        f"run_task_issue_context_used: {'true' if context['issue_context_used'] else 'false'}\n"
+        f"run_task_issue_number: {issue_number_text}\n"
+        f"run_task_fallback_summary: {fallback_summary_text}\n"
         f"run_task_result_file: {result_file.as_posix()}"
     )

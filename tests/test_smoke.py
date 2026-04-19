@@ -852,7 +852,90 @@ def test_validate_fails_when_workspace_file_missing(
     assert "validation_fallback_triggered: true" in validate_result.stdout
 
 
-def test_pr_draft_generates_json_and_markdown_for_valid_task_id(
+def test_pr_draft_generates_issue_aware_rule_draft_for_github_issue_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            return {
+                "full_name": f"{owner}/{repo}",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 1,
+            }
+
+        def get_open_issues(
+            self,
+            owner: str,
+            repo: str,
+            limit: int = 3,
+        ) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 7, "title": "Fix flaky planner output", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+    assert runner.invoke(app, ["validate", task_id]).exit_code == 0
+
+    pr_result = runner.invoke(app, ["pr-draft", task_id])
+    pr_json = tmp_path / "playground" / "outputs" / "pr_draft.json"
+    pr_md = tmp_path / "playground" / "outputs" / "pr_draft.md"
+    pr_llm_md = tmp_path / "playground" / "outputs" / "pr_draft_llm.md"
+
+    assert pr_result.exit_code == 0
+    assert pr_json.exists()
+    assert pr_md.exists()
+    assert not pr_llm_md.exists()
+
+    payload = json.loads(pr_json.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert "title" in payload
+    assert "summary" in payload
+    assert "changes" in payload
+    assert "validation" in payload
+    assert "risks" in payload
+    assert "status" in payload
+    assert payload["source"] == "github_issue"
+    assert payload["issue_number"] == 7
+    assert payload["issue_context_used"] is True
+    assert payload["fallback_triggered"] is False
+
+    markdown = pr_md.read_text(encoding="utf-8")
+    assert "# PR Draft" in markdown
+    assert "issue-aware" in markdown.lower()
+    assert "issue #7" in markdown.lower()
+    assert "## Changes" in markdown
+    assert "## Validation" in markdown
+    assert ("## Risks" in markdown) or ("## Notes" in markdown)
+
+    assert "PR draft generated" in pr_result.stdout
+    assert "used_llm: false" in pr_result.stdout
+    assert "rule_issue_context_used: true" in pr_result.stdout
+    assert "rule_fallback_triggered: false" in pr_result.stdout
+    assert "pr_draft.json" in pr_result.stdout
+    assert "pr_draft.md" in pr_result.stdout
+
+
+def test_pr_draft_generates_template_fallback_rule_draft_for_non_issue_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -888,14 +971,23 @@ def test_pr_draft_generates_json_and_markdown_for_valid_task_id(
     assert "validation" in payload
     assert "risks" in payload
     assert "status" in payload
+    assert payload["source"] == "template"
+    assert payload["issue_context_used"] is False
+    assert payload["fallback_triggered"] is True
+    assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     markdown = pr_md.read_text(encoding="utf-8")
     assert "# PR Draft" in markdown
     assert task_id in markdown
+    assert "template fallback" in markdown.lower()
+    assert "## Changes" in markdown
+    assert "## Validation" in markdown
+    assert ("## Risks" in markdown) or ("## Notes" in markdown)
 
     assert "PR draft generated" in pr_result.stdout
     assert "used_llm: false" in pr_result.stdout
-    assert "fallback_triggered: false" in pr_result.stdout
+    assert "rule_issue_context_used: false" in pr_result.stdout
+    assert "rule_fallback_triggered: true" in pr_result.stdout
     assert "pr_draft.json" in pr_result.stdout
     assert "pr_draft.md" in pr_result.stdout
 
@@ -968,7 +1060,7 @@ def test_pr_draft_use_llm_falls_back_when_real_llm_request_fails(
     assert "fallback_reason:" in result.stdout
 
 
-def test_run_task_executes_full_pipeline_for_valid_input(
+def test_run_task_generates_template_fallback_summary_for_non_issue_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -999,13 +1091,92 @@ def test_run_task_executes_full_pipeline_for_valid_input(
     assert payload["passed"] is True
     assert payload["status"] == "completed"
     assert "summary" in payload
+    assert payload["source"] == "template"
+    assert payload["issue_context_used"] is False
+    assert ("issue_number" not in payload) or (payload["issue_number"] is None)
+    assert payload["final_validation_passed"] is True
+    assert isinstance(payload["fallback_summary"], dict)
+    assert payload["fallback_summary"]["planning"] is True
+    assert payload["fallback_summary"]["patch"] is True
+    assert payload["fallback_summary"]["apply"] is True
+    assert payload["fallback_summary"]["validate"] is True
+    assert payload["fallback_summary"]["pr_draft"] is True
 
     for artifact_path in payload["artifacts"].values():
         assert (tmp_path / str(artifact_path)).exists()
 
     assert "Run task completed" in result.stdout
     assert "status: completed" in result.stdout
+    assert "run_task_issue_context_used: false" in result.stdout
+    assert "run_task_issue_number: none" in result.stdout
+    assert "run_task_fallback_summary:" in result.stdout
     assert "run_task_result.json" in result.stdout
+
+
+def test_run_task_generates_issue_aware_summary_for_github_issue_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            return {
+                "full_name": f"{owner}/{repo}",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 1,
+            }
+
+        def get_open_issues(
+            self,
+            owner: str,
+            repo: str,
+            limit: int = 3,
+        ) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 7, "title": "Fix flaky planner output", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
+
+    result = runner.invoke(app, ["run-task", "https://github.com/owner/repo"])
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+
+    assert result.exit_code == 0
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == "repo-issue-7"
+    assert payload["status"] == "completed"
+    assert payload["passed"] is True
+    assert payload["source"] == "github_issue"
+    assert payload["issue_number"] == 7
+    assert payload["issue_context_used"] is True
+    assert payload["final_validation_passed"] is True
+    assert payload["steps_completed"] == [
+        "analyze",
+        "plan",
+        "patch",
+        "apply",
+        "validate",
+        "pr-draft",
+    ]
+    assert payload["fallback_summary"]["planning"] is False
+    assert payload["fallback_summary"]["patch"] is False
+    assert payload["fallback_summary"]["apply"] is False
+    assert payload["fallback_summary"]["validate"] is False
+    assert payload["fallback_summary"]["pr_draft"] is False
+
+    assert "run_task_issue_context_used: true" in result.stdout
+    assert "run_task_issue_number: 7" in result.stdout
+    assert "run_task_fallback_summary:" in result.stdout
+    assert "run_task_result_file:" in result.stdout
 
 
 def test_run_task_cli_uses_typer_compatible_optional_annotation() -> None:
@@ -1030,6 +1201,10 @@ def test_run_task_auto_selects_first_candidate_task_when_task_id_omitted(
     assert payload["task_id"] == "repo-task-001"
     assert payload["status"] == "completed"
     assert payload["passed"] is True
+    assert payload["source"] == "template"
+    assert payload["issue_context_used"] is False
+    assert payload["final_validation_passed"] is True
+    assert isinstance(payload["fallback_summary"], dict)
     assert payload["steps_completed"] == [
         "analyze",
         "plan",
@@ -1059,6 +1234,10 @@ def test_run_task_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert payload["passed"] is False
     assert payload["status"] == "failed"
     assert payload["steps_completed"] == ["analyze"]
+    assert "source" in payload
+    assert "issue_context_used" in payload
+    assert "fallback_summary" in payload
+    assert "final_validation_passed" in payload
 
 
 def test_run_task_stops_when_a_step_fails(tmp_path: Path, monkeypatch) -> None:
@@ -1082,3 +1261,7 @@ def test_run_task_stops_when_a_step_fails(tmp_path: Path, monkeypatch) -> None:
     assert payload["steps_completed"] == []
     assert payload["passed"] is False
     assert payload["status"] == "failed"
+    assert "source" in payload
+    assert "issue_context_used" in payload
+    assert "fallback_summary" in payload
+    assert "final_validation_passed" in payload
