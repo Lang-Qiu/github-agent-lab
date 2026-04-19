@@ -2,12 +2,19 @@ import json
 import os
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from src.cli import app
 
 
 runner = CliRunner()
+pytestmark = pytest.mark.llm_integration
+
+
+def _require_llm_integration_enabled() -> None:
+    if os.getenv("RUN_LLM_INTEGRATION") != "1":
+        pytest.skip("Set RUN_LLM_INTEGRATION=1 to run llm_integration tests.")
 
 
 def _require_real_llm_env() -> dict[str, str]:
@@ -21,6 +28,7 @@ def _require_real_llm_env() -> dict[str, str]:
 
 
 def test_pr_draft_use_llm_real_integration(tmp_path: Path, monkeypatch) -> None:
+    _require_llm_integration_enabled()
     _require_real_llm_env()
 
     monkeypatch.chdir(tmp_path)

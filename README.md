@@ -88,10 +88,10 @@ python -m src.main analyze https://github.com/owner/repo
 5. 运行测试
 
 ```bash
-pytest
+pytest -q
 ```
 
-运行 pytest 前必须提供真实 LLM 环境变量（覆盖 --use-llm 成功路径测试）：
+运行 llm_integration 测试前必须提供真实 LLM 环境变量：
 
 ```bash
 set LLM_API_KEY=your_real_key
@@ -99,7 +99,18 @@ set LLM_BASE_URL=your_real_base_url
 set LLM_MODEL=your_real_model
 ```
 
-说明：默认测试会执行 `pr-draft --use-llm` 成功路径并真实调用 LLM；若环境变量缺失，测试会直接失败。
+默认回归测试不依赖真实 LLM 环境变量。
+
+运行真实 LLM 集成测试：
+
+```bash
+set RUN_LLM_INTEGRATION=1
+pytest -q -m llm_integration -o addopts=""
+```
+
+说明：
+- 默认 `pytest -q` 通过 `llm_integration` marker 隔离真实 LLM 测试。
+- 集成测试命令通过 `-o addopts=""` 覆盖默认筛选，确保只运行 `llm_integration` 测试。
 
 ## 简短 Roadmap
 

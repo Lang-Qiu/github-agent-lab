@@ -28,13 +28,23 @@ def test_llm_test_prerequisites_are_documented() -> None:
     env_example_text = Path(".env.example").read_text(encoding="utf-8")
     readme_text = Path("README.md").read_text(encoding="utf-8")
 
-    required_note = "运行 pytest 前必须提供真实 LLM 环境变量"
+    required_note = "运行 llm_integration 测试前必须提供真实 LLM 环境变量"
     assert required_note in env_example_text
     assert "LLM_API_KEY" in env_example_text
     assert "LLM_BASE_URL" in env_example_text
     assert "LLM_MODEL" in env_example_text
 
     assert required_note in readme_text
+    assert "pytest -q" in readme_text
+    assert "pytest -q -m llm_integration -o addopts=\"\"" in readme_text
+
+
+def test_pytest_default_excludes_llm_integration_marker() -> None:
+    pyproject_text = Path("pyproject.toml").read_text(encoding="utf-8")
+
+    assert "[tool.pytest.ini_options]" in pyproject_text
+    assert "addopts" in pyproject_text
+    assert "not llm_integration" in pyproject_text
 
 
 def test_analyze_prepares_local_summary(tmp_path: Path, monkeypatch) -> None:
@@ -1015,10 +1025,14 @@ def test_pr_draft_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert "Traceback" not in result.stdout
 
 
+@pytest.mark.llm_integration
 def test_pr_draft_use_llm_falls_back_when_real_llm_request_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    if os.getenv("RUN_LLM_INTEGRATION") != "1":
+        pytest.skip("Set RUN_LLM_INTEGRATION=1 to run llm_integration tests.")
+
     monkeypatch.chdir(tmp_path)
 
     required_envs = ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]
