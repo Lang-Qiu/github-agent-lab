@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "type": "command",
+        "windows": "powershell -ExecutionPolicy Bypass -File .github/hooks/auto-commit.ps1",
+        "timeout": 30
+      }
+    ]
+  }
+}
