@@ -6,6 +6,7 @@ import typer
 
 from .workflows.apply_patch import PatchApplyError, run_apply_patch
 from .workflows.analyze_repo import AnalyzeInputError, run_analyze_repo
+from .workflows.discover_tasks import DiscoverTasksError, run_discover_tasks
 from .workflows.generate_patch import PatchGenerationError, run_generate_patch
 from .workflows.pr_draft import PRDraftError, run_pr_draft
 from .workflows.run_task import RunTaskError, run_task
@@ -26,6 +27,25 @@ def analyze(
     try:
         message = run_analyze_repo(repo_url)
     except AnalyzeInputError as exc:
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.echo(message)
+
+
+@app.command("discover-tasks")
+def discover_tasks(
+    repo_url: str = typer.Argument(..., help="Target GitHub repository URL."),
+    use_llm: bool = typer.Option(
+        False,
+        "--use-llm",
+        help="Use LLM-enhanced candidate discovery with fallback to rule mode.",
+    ),
+) -> None:
+    """Discover candidate tasks from analysis summary artifacts."""
+    try:
+        message = run_discover_tasks(repo_url, use_llm=use_llm)
+    except DiscoverTasksError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
 

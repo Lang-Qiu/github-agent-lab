@@ -276,6 +276,136 @@ def test_analyze_rejects_invalid_urls(
     assert not (tmp_path / "playground" / "outputs").exists()
 
 
+def test_discover_tasks_generates_issue_aware_candidates_for_github_issue_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            return {
+                "full_name": f"{owner}/{repo}",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 2,
+            }
+
+        def get_open_issues(
+            self,
+            owner: str,
+            repo: str,
+            limit: int = 3,
+        ) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 1, "title": "Issue one", "state": "open"},
+                {"number": 2, "title": "Issue two", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
+
+    assert runner.invoke(app, ["analyze", "https://github.com/owner/repo"]).exit_code == 0
+
+    result = runner.invoke(app, ["discover-tasks", "https://github.com/owner/repo"])
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+
+    assert result.exit_code == 0
+    assert candidate_file.exists()
+
+    payload = json.loads(candidate_file.read_text(encoding="utf-8"))
+    assert payload["issue_context_used"] is True
+    assert payload["fallback_triggered"] is False
+    assert payload["used_llm"] is False
+    assert isinstance(payload["tasks"], list)
+    assert len(payload["tasks"]) == 2
+    assert payload["tasks"][0]["source"] == "github_issue"
+    assert payload["tasks"][0]["issue_number"] == 1
+    assert payload["tasks"][1]["source"] == "github_issue"
+    assert payload["tasks"][1]["issue_number"] == 2
+
+    assert "Candidate task discovery complete" in result.stdout
+    assert "candidate_tasks_file:" in result.stdout
+    assert "candidate_issue_context_used: true" in result.stdout
+    assert "candidate_fallback_triggered: false" in result.stdout
+    assert "used_llm: false" in result.stdout
+
+
+def test_discover_tasks_generates_template_fallback_when_no_issue_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert runner.invoke(app, ["analyze", "https://github.com/owner/repo"]).exit_code == 0
+
+    result = runner.invoke(app, ["discover-tasks", "https://github.com/owner/repo"])
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+
+    assert result.exit_code == 0
+    assert candidate_file.exists()
+
+    payload = json.loads(candidate_file.read_text(encoding="utf-8"))
+    assert payload["issue_context_used"] is False
+    assert payload["fallback_triggered"] is True
+    assert payload["used_llm"] is False
+    assert isinstance(payload["tasks"], list)
+    assert len(payload["tasks"]) > 0
+    for task in payload["tasks"]:
+        assert task["source"] == "template"
+        assert "issue_number" not in task
+
+    assert "Candidate task discovery complete" in result.stdout
+    assert "candidate_tasks_file:" in result.stdout
+    assert "candidate_issue_context_used: false" in result.stdout
+    assert "candidate_fallback_triggered: true" in result.stdout
+    assert "used_llm: false" in result.stdout
+
+
+def test_discover_tasks_use_llm_falls_back_to_rule_when_llm_request_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert runner.invoke(app, ["analyze", "https://github.com/owner/repo"]).exit_code == 0
+
+    from src.llm_client import LLMClientError
+
+    def _raise_llm_failure():
+        raise LLMClientError("Missing LLM config: LLM_API_KEY")
+
+    monkeypatch.setattr("src.llm_client.LLMClient.from_env", _raise_llm_failure)
+
+    result = runner.invoke(
+        app,
+        ["discover-tasks", "https://github.com/owner/repo", "--use-llm"],
+    )
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+
+    assert result.exit_code == 0
+    assert candidate_file.exists()
+
+    payload = json.loads(candidate_file.read_text(encoding="utf-8"))
+    assert payload["issue_context_used"] is False
+    assert payload["fallback_triggered"] is True
+    assert payload["used_llm"] is False
+    assert payload["fallback_reason"] == "Missing LLM config: LLM_API_KEY"
+    assert isinstance(payload["tasks"], list)
+    assert len(payload["tasks"]) > 0
+
+    assert "Candidate task discovery complete" in result.stdout
+    assert "candidate_tasks_file:" in result.stdout
+    assert "candidate_issue_context_used: false" in result.stdout
+    assert "candidate_fallback_triggered: true" in result.stdout
+    assert "used_llm: false" in result.stdout
+    assert "fallback_reason: Missing LLM config: LLM_API_KEY" in result.stdout
+
+
 def test_plan_generates_issue_aware_task_plan_for_github_issue_source(
     tmp_path: Path,
     monkeypatch,
