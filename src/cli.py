@@ -41,10 +41,15 @@ def version() -> None:
 @app.command()
 def plan(
     task_id: str = typer.Argument(..., help="Candidate task id from candidate_tasks.json."),
+    use_llm: bool = typer.Option(
+        False,
+        "--use-llm",
+        help="Use LLM-enhanced planning with fallback to rule mode.",
+    ),
 ) -> None:
     """Generate a minimal task_plan.json from candidate tasks."""
     try:
-        message = run_task_planning(task_id)
+        message = run_task_planning(task_id, use_llm=use_llm)
     except TaskPlanningError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)

@@ -342,10 +342,13 @@ def test_plan_generates_issue_aware_task_plan_for_github_issue_source(
     assert task_plan["issue_number"] == 7
     assert task_plan["issue_context_used"] is True
     assert task_plan["fallback_triggered"] is False
+    assert task_plan["used_llm"] is False
+    assert ("fallback_reason" not in task_plan) or (task_plan["fallback_reason"] == "")
 
     assert "Task plan generated" in plan_result.stdout
     assert "task_plan_issue_context_used: true" in plan_result.stdout
     assert "task_plan_fallback_triggered: false" in plan_result.stdout
+    assert "used_llm: false" in plan_result.stdout
     assert "task_plan.json" in plan_result.stdout
 
 
@@ -380,12 +383,57 @@ def test_plan_generates_template_fallback_for_non_issue_source(
     assert task_plan["source"] == "template"
     assert task_plan["issue_context_used"] is False
     assert task_plan["fallback_triggered"] is True
+    assert task_plan["used_llm"] is False
+    assert ("fallback_reason" not in task_plan) or (task_plan["fallback_reason"] == "")
     assert ("issue_number" not in task_plan) or (task_plan["issue_number"] is None)
 
     assert "Task plan generated" in plan_result.stdout
     assert "task_plan_issue_context_used: false" in plan_result.stdout
     assert "task_plan_fallback_triggered: true" in plan_result.stdout
+    assert "used_llm: false" in plan_result.stdout
     assert "task_plan_file:" in plan_result.stdout
+
+
+def test_plan_use_llm_falls_back_to_rule_when_llm_request_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    from src.llm_client import LLMClientError
+
+    def _raise_llm_failure():
+        raise LLMClientError("Missing LLM config: LLM_API_KEY")
+
+    monkeypatch.setattr("src.llm_client.LLMClient.from_env", _raise_llm_failure)
+
+    plan_result = runner.invoke(app, ["plan", task_id, "--use-llm"])
+    task_plan_file = tmp_path / "playground" / "outputs" / "task_plan.json"
+
+    assert plan_result.exit_code == 0
+    assert task_plan_file.exists()
+
+    task_plan = json.loads(task_plan_file.read_text(encoding="utf-8"))
+    assert task_plan["task_id"] == task_id
+    assert task_plan["source"] == "template"
+    assert task_plan["issue_context_used"] is False
+    assert task_plan["fallback_triggered"] is True
+    assert task_plan["used_llm"] is False
+    assert task_plan["fallback_reason"] == "Missing LLM config: LLM_API_KEY"
+
+    assert "Task plan generated" in plan_result.stdout
+    assert "task_plan_file:" in plan_result.stdout
+    assert "task_plan_issue_context_used: false" in plan_result.stdout
+    assert "task_plan_fallback_triggered: true" in plan_result.stdout
+    assert "used_llm: false" in plan_result.stdout
+    assert "fallback_reason: Missing LLM config: LLM_API_KEY" in plan_result.stdout
 
 
 def test_plan_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
