@@ -18,10 +18,15 @@ def _read_json_file(file_path: Path, missing_message: str) -> dict[str, object]:
 
 
 def _resolve_workspace_dir(output_dir: Path, task_id: str) -> tuple[Path, str]:
-    if "-task-" not in task_id:
+    repo = ""
+    if "-task-" in task_id:
+        repo = task_id.split("-task-", maxsplit=1)[0]
+    elif "-issue-" in task_id:
+        repo = task_id.split("-issue-", maxsplit=1)[0]
+
+    if not repo:
         raise PatchApplyError(f"task_id not found: {task_id}")
 
-    repo = task_id.split("-task-", maxsplit=1)[0]
     summary_file = output_dir / f"{repo}_summary.json"
     summary = _read_json_file(
         summary_file,
@@ -89,6 +94,30 @@ def run_apply_patch(task_id: str) -> str:
     if str(task_plan.get("task_id")) != task_id or str(patch_preview.get("task_id")) != task_id:
         raise PatchApplyError(f"task_id not found: {task_id}")
 
+    task_source = str(task_plan.get("source", "template"))
+    preview_source = str(patch_preview.get("source", "template"))
+    task_issue_context = bool(task_plan.get("issue_context_used", False))
+    preview_issue_context = bool(patch_preview.get("issue_context_used", False))
+    task_issue_number_raw = task_plan.get("issue_number")
+    preview_issue_number_raw = patch_preview.get("issue_number")
+    task_issue_number = (
+        task_issue_number_raw if isinstance(task_issue_number_raw, int) else None
+    )
+    preview_issue_number = (
+        preview_issue_number_raw if isinstance(preview_issue_number_raw, int) else None
+    )
+
+    issue_context_used = (
+        task_source == "github_issue"
+        and preview_source == "github_issue"
+        and task_issue_context
+        and preview_issue_context
+        and task_issue_number is not None
+        and preview_issue_number == task_issue_number
+    )
+    fallback_triggered = not issue_context_used
+    source = "github_issue" if issue_context_used else "template"
+
     workspace_path, workspace_dir = _resolve_workspace_dir(output_dir, task_id)
     applied_files, created_files, modified_files = _write_workspace_changes(
         workspace_path,
@@ -105,7 +134,13 @@ def run_apply_patch(task_id: str) -> str:
         "modified_files": modified_files,
         "status": "applied",
         "summary": f"Applied {len(applied_files)} file changes to workspace.",
+        "source": source,
+        "issue_context_used": issue_context_used,
+        "fallback_triggered": fallback_triggered,
     }
+
+    if issue_context_used and task_issue_number is not None:
+        result["issue_number"] = task_issue_number
 
     output_dir.mkdir(parents=True, exist_ok=True)
     result_file = output_dir / "patch_apply_result.json"
@@ -119,5 +154,7 @@ def run_apply_patch(task_id: str) -> str:
         f"task_id: {task_id}\n"
         f"workspace_dir: {workspace_dir}\n"
         f"applied_files_count: {len(applied_files)}\n"
+        f"patch_apply_issue_context_used: {'true' if issue_context_used else 'false'}\n"
+        f"patch_apply_fallback_triggered: {'true' if fallback_triggered else 'false'}\n"
         f"patch_apply_result_file: {result_file.as_posix()}"
     )

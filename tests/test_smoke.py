@@ -528,11 +528,37 @@ def test_patch_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert "Traceback" not in result.stdout
 
 
-def test_apply_generates_result_and_writes_workspace_changes(
+def test_apply_generates_issue_aware_result_for_github_issue_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            return {
+                "full_name": f"{owner}/{repo}",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 1,
+            }
+
+        def get_open_issues(
+            self,
+            owner: str,
+            repo: str,
+            limit: int = 3,
+        ) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 7, "title": "Fix flaky planner output", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
 
     analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
     assert analyze_result.exit_code == 0
@@ -562,12 +588,67 @@ def test_apply_generates_result_and_writes_workspace_changes(
     assert len(payload["applied_files"]) > 0
     assert payload["status"] == "applied"
     assert "summary" in payload
+    assert payload["source"] == "github_issue"
+    assert payload["issue_number"] == 7
+    assert payload["issue_context_used"] is True
+    assert payload["fallback_triggered"] is False
+
+    for file_path in payload["applied_files"]:
+        assert (tmp_path / file_path).exists()
+
+    patch_log_file = tmp_path / "playground" / "repos" / "owner" / "repo" / "APPLIED_PATCH_LOG.md"
+    assert patch_log_file.exists()
+    assert "issue #7" in patch_log_file.read_text(encoding="utf-8").lower()
+
+    assert "Patch applied to workspace" in apply_result.stdout
+    assert "patch_apply_issue_context_used: true" in apply_result.stdout
+    assert "patch_apply_fallback_triggered: false" in apply_result.stdout
+    assert "patch_apply_result.json" in apply_result.stdout
+
+
+def test_apply_generates_template_fallback_for_non_issue_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+
+    apply_result = runner.invoke(app, ["apply", task_id])
+    apply_result_file = tmp_path / "playground" / "outputs" / "patch_apply_result.json"
+
+    assert apply_result.exit_code == 0
+    assert apply_result_file.exists()
+
+    payload = json.loads(apply_result_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert payload["workspace_dir"] == "playground/repos/owner/repo"
+    assert isinstance(payload["applied_files"], list)
+    assert isinstance(payload["created_files"], list)
+    assert isinstance(payload["modified_files"], list)
+    assert len(payload["applied_files"]) > 0
+    assert payload["status"] == "applied"
+    assert "summary" in payload
+    assert payload["source"] == "template"
+    assert payload["issue_context_used"] is False
+    assert payload["fallback_triggered"] is True
+    assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     for file_path in payload["applied_files"]:
         assert (tmp_path / file_path).exists()
 
     assert "Patch applied to workspace" in apply_result.stdout
-    assert "patch_apply_result.json" in apply_result.stdout
+    assert "patch_apply_issue_context_used: false" in apply_result.stdout
+    assert "patch_apply_fallback_triggered: true" in apply_result.stdout
+    assert "patch_apply_result_file:" in apply_result.stdout
 
 
 def test_apply_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
@@ -594,7 +675,76 @@ def test_apply_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert "Traceback" not in result.stdout
 
 
-def test_validate_generates_validation_result_for_valid_task_id(
+def test_validate_generates_issue_aware_validation_result_for_github_issue_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            return {
+                "full_name": f"{owner}/{repo}",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 1,
+            }
+
+        def get_open_issues(
+            self,
+            owner: str,
+            repo: str,
+            limit: int = 3,
+        ) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 7, "title": "Fix flaky planner output", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+
+    validate_result = runner.invoke(app, ["validate", task_id])
+    validation_file = tmp_path / "playground" / "outputs" / "validation_result.json"
+
+    assert validate_result.exit_code == 0
+    assert validation_file.exists()
+
+    payload = json.loads(validation_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert payload["workspace_dir"] == "playground/repos/owner/repo"
+    assert isinstance(payload["checked_files"], list)
+    assert isinstance(payload["missing_files"], list)
+    assert isinstance(payload["validation_steps"], list)
+    assert payload["passed"] is True
+    assert payload["status"] == "passed"
+    assert "summary" in payload
+    assert payload["source"] == "github_issue"
+    assert payload["issue_number"] == 7
+    assert payload["issue_context_used"] is True
+    assert payload["fallback_triggered"] is False
+
+    assert "Validation completed" in validate_result.stdout
+    assert "validation_issue_context_used: true" in validate_result.stdout
+    assert "validation_fallback_triggered: false" in validate_result.stdout
+    assert "validation_result.json" in validate_result.stdout
+
+
+def test_validate_generates_template_fallback_for_non_issue_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -626,8 +776,14 @@ def test_validate_generates_validation_result_for_valid_task_id(
     assert payload["passed"] is True
     assert payload["status"] == "passed"
     assert "summary" in payload
+    assert payload["source"] == "template"
+    assert payload["issue_context_used"] is False
+    assert payload["fallback_triggered"] is True
+    assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     assert "Validation completed" in validate_result.stdout
+    assert "validation_issue_context_used: false" in validate_result.stdout
+    assert "validation_fallback_triggered: true" in validate_result.stdout
     assert "validation_result.json" in validate_result.stdout
 
 
@@ -685,9 +841,15 @@ def test_validate_fails_when_workspace_file_missing(
     assert payload["passed"] is False
     assert payload["status"] == "failed"
     assert apply_payload["applied_files"][0] in payload["missing_files"]
+    assert payload["source"] == "template"
+    assert payload["issue_context_used"] is False
+    assert payload["fallback_triggered"] is True
+    assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     assert "Validation completed" in validate_result.stdout
     assert "status: failed" in validate_result.stdout
+    assert "validation_issue_context_used: false" in validate_result.stdout
+    assert "validation_fallback_triggered: true" in validate_result.stdout
 
 
 def test_pr_draft_generates_json_and_markdown_for_valid_task_id(
