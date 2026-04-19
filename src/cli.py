@@ -80,10 +80,15 @@ def plan(
 @app.command()
 def patch(
     task_id: str = typer.Argument(..., help="Task id from task_plan.json."),
+    use_llm: bool = typer.Option(
+        False,
+        "--use-llm",
+        help="Use LLM-enhanced patch preview generation with fallback to rule mode.",
+    ),
 ) -> None:
     """Generate a minimal patch_preview.json from task_plan."""
     try:
-        message = run_generate_patch(task_id)
+        message = run_generate_patch(task_id, use_llm=use_llm)
     except PatchGenerationError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
@@ -94,10 +99,15 @@ def patch(
 @app.command()
 def apply(
     task_id: str = typer.Argument(..., help="Task id from patch_preview.json."),
+    use_llm: bool = typer.Option(
+        False,
+        "--use-llm",
+        help="Use LLM-enhanced apply mode with fallback to rule mode.",
+    ),
 ) -> None:
     """Apply minimal workspace edits from patch preview and task plan."""
     try:
-        message = run_apply_patch(task_id)
+        message = run_apply_patch(task_id, use_llm=use_llm)
     except PatchApplyError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
@@ -108,10 +118,15 @@ def apply(
 @app.command()
 def validate(
     task_id: str = typer.Argument(..., help="Task id from patch_apply_result.json."),
+    use_llm: bool = typer.Option(
+        False,
+        "--use-llm",
+        help="Use LLM-enhanced validation with fallback to rule mode.",
+    ),
 ) -> None:
     """Run minimal workspace validation for an applied patch."""
     try:
-        message = run_validate_patch(task_id)
+        message = run_validate_patch(task_id, use_llm=use_llm)
     except ValidationError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
@@ -145,10 +160,49 @@ def run_task_command(
         None,
         help="Optional task id. If omitted, run-task uses the first candidate task.",
     ),
+    use_llm_discover: bool = typer.Option(
+        False,
+        "--use-llm-discover",
+        help="Enable LLM mode for discover-tasks step with workflow fallback.",
+    ),
+    use_llm_plan: bool = typer.Option(
+        False,
+        "--use-llm-plan",
+        help="Enable LLM mode for plan step with workflow fallback.",
+    ),
+    use_llm_patch: bool = typer.Option(
+        False,
+        "--use-llm-patch",
+        help="Enable LLM mode for patch step with workflow fallback.",
+    ),
+    use_llm_apply: bool = typer.Option(
+        False,
+        "--use-llm-apply",
+        help="Enable LLM mode for apply step with workflow fallback.",
+    ),
+    use_llm_validate: bool = typer.Option(
+        False,
+        "--use-llm-validate",
+        help="Enable LLM mode for validate step with workflow fallback.",
+    ),
+    use_llm_pr_draft: bool = typer.Option(
+        False,
+        "--use-llm-pr-draft",
+        help="Enable LLM mode for pr-draft step with workflow fallback.",
+    ),
 ) -> None:
     """Run analyze->plan->patch->apply->validate->pr-draft end-to-end."""
     try:
-        message = run_task(repo_url, task_id)
+        message = run_task(
+            repo_url,
+            task_id,
+            use_llm_discover=use_llm_discover,
+            use_llm_plan=use_llm_plan,
+            use_llm_patch=use_llm_patch,
+            use_llm_apply=use_llm_apply,
+            use_llm_validate=use_llm_validate,
+            use_llm_pr_draft=use_llm_pr_draft,
+        )
     except RunTaskError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)

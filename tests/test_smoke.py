@@ -27,6 +27,7 @@ def test_help_command_runs() -> None:
 def test_llm_test_prerequisites_are_documented() -> None:
     env_example_text = Path(".env.example").read_text(encoding="utf-8")
     readme_text = Path("README.md").read_text(encoding="utf-8")
+    llm_integration_test_text = Path("tests/test_llm_integration.py").read_text(encoding="utf-8")
 
     required_note = "运行 llm_integration 测试前必须提供真实 LLM 环境变量"
     assert required_note in env_example_text
@@ -37,6 +38,15 @@ def test_llm_test_prerequisites_are_documented() -> None:
     assert required_note in readme_text
     assert "pytest -q" in readme_text
     assert "pytest -q -m llm_integration -o addopts=\"\"" in readme_text
+    assert "RUN_LLM_INTEGRATION=1" in env_example_text
+    assert "run-task" in readme_text
+    assert "--use-llm-discover" in readme_text
+    assert "--use-llm-plan" in readme_text
+    assert "--use-llm-patch" in readme_text
+    assert "--use-llm-apply" in readme_text
+    assert "--use-llm-validate" in readme_text
+    assert "--use-llm-pr-draft" in readme_text
+    assert "test_run_task_use_llm_real_integration" in llm_integration_test_text
 
 
 def test_pytest_default_excludes_llm_integration_marker() -> None:
@@ -646,10 +656,13 @@ def test_patch_generates_issue_aware_preview_for_github_issue_source(
     assert patch_preview["issue_number"] == 7
     assert patch_preview["issue_context_used"] is True
     assert patch_preview["fallback_triggered"] is False
+    assert patch_preview["used_llm"] is False
+    assert ("fallback_reason" not in patch_preview) or (patch_preview["fallback_reason"] == "")
 
     assert "Patch preview generated" in patch_result.stdout
     assert "patch_issue_context_used: true" in patch_result.stdout
     assert "patch_fallback_triggered: false" in patch_result.stdout
+    assert "used_llm: false" in patch_result.stdout
     assert "patch_preview.json" in patch_result.stdout
 
 
@@ -687,12 +700,59 @@ def test_patch_generates_template_fallback_for_non_issue_source(
     assert patch_preview["source"] == "template"
     assert patch_preview["issue_context_used"] is False
     assert patch_preview["fallback_triggered"] is True
+    assert patch_preview["used_llm"] is False
+    assert ("fallback_reason" not in patch_preview) or (patch_preview["fallback_reason"] == "")
     assert ("issue_number" not in patch_preview) or (patch_preview["issue_number"] is None)
 
     assert "Patch preview generated" in patch_result.stdout
     assert "patch_issue_context_used: false" in patch_result.stdout
     assert "patch_fallback_triggered: true" in patch_result.stdout
+    assert "used_llm: false" in patch_result.stdout
     assert "patch_preview_file:" in patch_result.stdout
+
+
+def test_patch_use_llm_falls_back_to_rule_when_llm_request_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+
+    from src.llm_client import LLMClientError
+
+    def _raise_llm_failure():
+        raise LLMClientError("Missing LLM config: LLM_API_KEY")
+
+    monkeypatch.setattr("src.llm_client.LLMClient.from_env", _raise_llm_failure)
+
+    patch_result = runner.invoke(app, ["patch", task_id, "--use-llm"])
+    patch_file = tmp_path / "playground" / "outputs" / "patch_preview.json"
+
+    assert patch_result.exit_code == 0
+    assert patch_file.exists()
+
+    patch_preview = json.loads(patch_file.read_text(encoding="utf-8"))
+    assert patch_preview["task_id"] == task_id
+    assert patch_preview["source"] == "template"
+    assert patch_preview["issue_context_used"] is False
+    assert patch_preview["fallback_triggered"] is True
+    assert patch_preview["used_llm"] is False
+    assert patch_preview["fallback_reason"] == "Missing LLM config: LLM_API_KEY"
+
+    assert "Patch preview generated" in patch_result.stdout
+    assert "patch_preview_file:" in patch_result.stdout
+    assert "patch_issue_context_used: false" in patch_result.stdout
+    assert "patch_fallback_triggered: true" in patch_result.stdout
+    assert "used_llm: false" in patch_result.stdout
+    assert "fallback_reason: Missing LLM config: LLM_API_KEY" in patch_result.stdout
 
 
 def test_patch_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
@@ -780,6 +840,8 @@ def test_apply_generates_issue_aware_result_for_github_issue_source(
     assert payload["issue_number"] == 7
     assert payload["issue_context_used"] is True
     assert payload["fallback_triggered"] is False
+    assert payload["used_llm"] is False
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
 
     for file_path in payload["applied_files"]:
         assert (tmp_path / file_path).exists()
@@ -791,6 +853,7 @@ def test_apply_generates_issue_aware_result_for_github_issue_source(
     assert "Patch applied to workspace" in apply_result.stdout
     assert "patch_apply_issue_context_used: true" in apply_result.stdout
     assert "patch_apply_fallback_triggered: false" in apply_result.stdout
+    assert "used_llm: false" in apply_result.stdout
     assert "patch_apply_result.json" in apply_result.stdout
 
 
@@ -828,6 +891,8 @@ def test_apply_generates_template_fallback_for_non_issue_source(
     assert payload["source"] == "template"
     assert payload["issue_context_used"] is False
     assert payload["fallback_triggered"] is True
+    assert payload["used_llm"] is False
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
     assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     for file_path in payload["applied_files"]:
@@ -836,6 +901,94 @@ def test_apply_generates_template_fallback_for_non_issue_source(
     assert "Patch applied to workspace" in apply_result.stdout
     assert "patch_apply_issue_context_used: false" in apply_result.stdout
     assert "patch_apply_fallback_triggered: true" in apply_result.stdout
+    assert "used_llm: false" in apply_result.stdout
+    assert "patch_apply_result_file:" in apply_result.stdout
+
+
+def test_apply_use_llm_uses_llm_summary_when_request_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+
+    class DummyLLMClient:
+        def generate(self, prompt: str) -> str:
+            assert "Task ID" in prompt
+            return json.dumps(
+                {
+                    "summary": "LLM apply summary for task execution.",
+                }
+            )
+
+    monkeypatch.setattr(
+        "src.workflows.apply_patch.LLMClient.from_env",
+        lambda: DummyLLMClient(),
+    )
+
+    apply_result = runner.invoke(app, ["apply", task_id, "--use-llm"])
+    apply_result_file = tmp_path / "playground" / "outputs" / "patch_apply_result.json"
+
+    assert apply_result.exit_code == 0
+    assert apply_result_file.exists()
+
+    payload = json.loads(apply_result_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert payload["used_llm"] is True
+    assert payload["summary"] == "LLM apply summary for task execution."
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
+
+    assert "Patch applied to workspace" in apply_result.stdout
+    assert "used_llm: true" in apply_result.stdout
+    assert "patch_apply_result_file:" in apply_result.stdout
+
+
+def test_apply_use_llm_falls_back_to_rule_when_llm_request_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+
+    from src.llm_client import LLMClientError
+
+    def _raise_llm_failure():
+        raise LLMClientError("Missing LLM config: LLM_API_KEY")
+
+    monkeypatch.setattr("src.workflows.apply_patch.LLMClient.from_env", _raise_llm_failure)
+
+    apply_result = runner.invoke(app, ["apply", task_id, "--use-llm"])
+    apply_result_file = tmp_path / "playground" / "outputs" / "patch_apply_result.json"
+
+    assert apply_result.exit_code == 0
+    assert apply_result_file.exists()
+
+    payload = json.loads(apply_result_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert payload["used_llm"] is False
+    assert payload["fallback_reason"] == "Missing LLM config: LLM_API_KEY"
+
+    assert "Patch applied to workspace" in apply_result.stdout
+    assert "used_llm: false" in apply_result.stdout
+    assert "fallback_reason: Missing LLM config: LLM_API_KEY" in apply_result.stdout
     assert "patch_apply_result_file:" in apply_result.stdout
 
 
@@ -925,10 +1078,13 @@ def test_validate_generates_issue_aware_validation_result_for_github_issue_sourc
     assert payload["issue_number"] == 7
     assert payload["issue_context_used"] is True
     assert payload["fallback_triggered"] is False
+    assert payload["used_llm"] is False
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
 
     assert "Validation completed" in validate_result.stdout
     assert "validation_issue_context_used: true" in validate_result.stdout
     assert "validation_fallback_triggered: false" in validate_result.stdout
+    assert "used_llm: false" in validate_result.stdout
     assert "validation_result.json" in validate_result.stdout
 
 
@@ -967,12 +1123,112 @@ def test_validate_generates_template_fallback_for_non_issue_source(
     assert payload["source"] == "template"
     assert payload["issue_context_used"] is False
     assert payload["fallback_triggered"] is True
+    assert payload["used_llm"] is False
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
     assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     assert "Validation completed" in validate_result.stdout
     assert "validation_issue_context_used: false" in validate_result.stdout
     assert "validation_fallback_triggered: true" in validate_result.stdout
+    assert "used_llm: false" in validate_result.stdout
     assert "validation_result.json" in validate_result.stdout
+
+
+def test_validate_use_llm_uses_llm_summary_and_steps_when_request_succeeds(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+
+    class DummyLLMClient:
+        def generate(self, prompt: str) -> str:
+            assert "Task ID" in prompt
+            return json.dumps(
+                {
+                    "summary": "LLM validation summary for verified apply output.",
+                    "validation_steps": [
+                        "LLM reviewed checked files and found no mismatches.",
+                        "LLM confirmed validation evidence is consistent.",
+                    ],
+                }
+            )
+
+    monkeypatch.setattr(
+        "src.workflows.validate_patch.LLMClient.from_env",
+        lambda: DummyLLMClient(),
+    )
+
+    validate_result = runner.invoke(app, ["validate", task_id, "--use-llm"])
+    validation_file = tmp_path / "playground" / "outputs" / "validation_result.json"
+
+    assert validate_result.exit_code == 0
+    assert validation_file.exists()
+
+    payload = json.loads(validation_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert payload["used_llm"] is True
+    assert payload["summary"] == "LLM validation summary for verified apply output."
+    assert payload["validation_steps"] == [
+        "LLM reviewed checked files and found no mismatches.",
+        "LLM confirmed validation evidence is consistent.",
+    ]
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
+
+    assert "Validation completed" in validate_result.stdout
+    assert "used_llm: true" in validate_result.stdout
+    assert "validation_result_file:" in validate_result.stdout
+
+
+def test_validate_use_llm_falls_back_to_rule_when_llm_request_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+
+    from src.llm_client import LLMClientError
+
+    def _raise_llm_failure():
+        raise LLMClientError("Missing LLM config: LLM_API_KEY")
+
+    monkeypatch.setattr("src.workflows.validate_patch.LLMClient.from_env", _raise_llm_failure)
+
+    validate_result = runner.invoke(app, ["validate", task_id, "--use-llm"])
+    validation_file = tmp_path / "playground" / "outputs" / "validation_result.json"
+
+    assert validate_result.exit_code == 0
+    assert validation_file.exists()
+
+    payload = json.loads(validation_file.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert payload["used_llm"] is False
+    assert payload["fallback_reason"] == "Missing LLM config: LLM_API_KEY"
+
+    assert "Validation completed" in validate_result.stdout
+    assert "used_llm: false" in validate_result.stdout
+    assert "fallback_reason: Missing LLM config: LLM_API_KEY" in validate_result.stdout
+    assert "validation_result_file:" in validate_result.stdout
 
 
 def test_validate_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
@@ -1032,12 +1288,15 @@ def test_validate_fails_when_workspace_file_missing(
     assert payload["source"] == "template"
     assert payload["issue_context_used"] is False
     assert payload["fallback_triggered"] is True
+    assert payload["used_llm"] is False
+    assert ("fallback_reason" not in payload) or (payload["fallback_reason"] == "")
     assert ("issue_number" not in payload) or (payload["issue_number"] is None)
 
     assert "Validation completed" in validate_result.stdout
     assert "status: failed" in validate_result.stdout
     assert "validation_issue_context_used: false" in validate_result.stdout
     assert "validation_fallback_triggered: true" in validate_result.stdout
+    assert "used_llm: false" in validate_result.stdout
 
 
 def test_pr_draft_generates_issue_aware_rule_draft_for_github_issue_source(
@@ -1293,6 +1552,36 @@ def test_run_task_generates_template_fallback_summary_for_non_issue_source(
     assert payload["fallback_summary"]["apply"] is True
     assert payload["fallback_summary"]["validate"] is True
     assert payload["fallback_summary"]["pr_draft"] is True
+    assert payload["llm_steps_requested"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["llm_steps_used"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["llm_steps_fallback"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["final_discover_used_llm"] is False
+    assert payload["final_plan_used_llm"] is False
+    assert payload["final_patch_used_llm"] is False
+    assert payload["final_apply_used_llm"] is False
+    assert payload["final_validate_used_llm"] is False
+    assert payload["final_pr_draft_used_llm"] is False
 
     for artifact_path in payload["artifacts"].values():
         assert (tmp_path / str(artifact_path)).exists()
@@ -1302,7 +1591,86 @@ def test_run_task_generates_template_fallback_summary_for_non_issue_source(
     assert "run_task_issue_context_used: false" in result.stdout
     assert "run_task_issue_number: none" in result.stdout
     assert "run_task_fallback_summary:" in result.stdout
+    assert "run_task_llm_steps_requested:" in result.stdout
+    assert "run_task_llm_steps_used:" in result.stdout
+    assert "run_task_llm_steps_fallback:" in result.stdout
     assert "run_task_result.json" in result.stdout
+
+
+def test_run_task_succeeds_when_requested_llm_steps_fall_back(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    from src.llm_client import LLMClientError
+
+    def _raise_llm_failure():
+        raise LLMClientError("Missing LLM config: LLM_API_KEY")
+
+    monkeypatch.setattr("src.llm_client.LLMClient.from_env", _raise_llm_failure)
+
+    repo_url = "https://github.com/owner/repo"
+    result = runner.invoke(
+        app,
+        [
+            "run-task",
+            repo_url,
+            "repo-task-001",
+            "--use-llm-discover",
+            "--use-llm-plan",
+            "--use-llm-patch",
+            "--use-llm-apply",
+            "--use-llm-validate",
+            "--use-llm-pr-draft",
+        ],
+    )
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+
+    assert result.exit_code == 0
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["repo_url"] == repo_url
+    assert payload["task_id"] == "repo-task-001"
+    assert payload["status"] == "completed"
+    assert payload["passed"] is True
+    assert payload["llm_steps_requested"] == {
+        "discover": True,
+        "plan": True,
+        "patch": True,
+        "apply": True,
+        "validate": True,
+        "pr_draft": True,
+    }
+    assert payload["llm_steps_used"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["llm_steps_fallback"] == {
+        "discover": True,
+        "plan": True,
+        "patch": True,
+        "apply": True,
+        "validate": True,
+        "pr_draft": True,
+    }
+    assert payload["final_discover_used_llm"] is False
+    assert payload["final_plan_used_llm"] is False
+    assert payload["final_patch_used_llm"] is False
+    assert payload["final_apply_used_llm"] is False
+    assert payload["final_validate_used_llm"] is False
+    assert payload["final_pr_draft_used_llm"] is False
+
+    assert "status: completed" in result.stdout
+    assert "run_task_llm_steps_requested:" in result.stdout
+    assert "run_task_llm_steps_used:" in result.stdout
+    assert "run_task_llm_steps_fallback:" in result.stdout
+    assert "run_task_result_file:" in result.stdout
 
 
 def test_run_task_generates_issue_aware_summary_for_github_issue_source(
@@ -1364,10 +1732,43 @@ def test_run_task_generates_issue_aware_summary_for_github_issue_source(
     assert payload["fallback_summary"]["apply"] is False
     assert payload["fallback_summary"]["validate"] is False
     assert payload["fallback_summary"]["pr_draft"] is False
+    assert payload["llm_steps_requested"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["llm_steps_used"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["llm_steps_fallback"] == {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    assert payload["final_discover_used_llm"] is False
+    assert payload["final_plan_used_llm"] is False
+    assert payload["final_patch_used_llm"] is False
+    assert payload["final_apply_used_llm"] is False
+    assert payload["final_validate_used_llm"] is False
+    assert payload["final_pr_draft_used_llm"] is False
 
     assert "run_task_issue_context_used: true" in result.stdout
     assert "run_task_issue_number: 7" in result.stdout
     assert "run_task_fallback_summary:" in result.stdout
+    assert "run_task_llm_steps_requested:" in result.stdout
+    assert "run_task_llm_steps_used:" in result.stdout
+    assert "run_task_llm_steps_fallback:" in result.stdout
     assert "run_task_result_file:" in result.stdout
 
 
@@ -1430,6 +1831,15 @@ def test_run_task_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert "issue_context_used" in payload
     assert "fallback_summary" in payload
     assert "final_validation_passed" in payload
+    assert "llm_steps_requested" in payload
+    assert "llm_steps_used" in payload
+    assert "llm_steps_fallback" in payload
+    assert "final_discover_used_llm" in payload
+    assert "final_plan_used_llm" in payload
+    assert "final_patch_used_llm" in payload
+    assert "final_apply_used_llm" in payload
+    assert "final_validate_used_llm" in payload
+    assert "final_pr_draft_used_llm" in payload
 
 
 def test_run_task_stops_when_a_step_fails(tmp_path: Path, monkeypatch) -> None:

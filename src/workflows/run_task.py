@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .analyze_repo import AnalyzeInputError, parse_repo_url, run_analyze_repo
 from .apply_patch import PatchApplyError, run_apply_patch
+from .discover_tasks import DiscoverTasksError, run_discover_tasks
 from .generate_patch import PatchGenerationError, run_generate_patch
 from .pr_draft import PRDraftError, run_pr_draft
 from .task_planning import TaskPlanningError, run_task_planning
@@ -33,6 +34,14 @@ def _extract_fallback_flag(payload: dict[str, object] | None) -> bool | None:
         return value
 
     return None
+
+
+def _extract_used_llm_from_message(message: str) -> bool:
+    return "used_llm: true" in message.lower()
+
+
+def _extract_llm_fallback_from_message(message: str) -> bool:
+    return "fallback_reason:" in message
 
 
 def _build_run_task_context(output_dir: Path) -> dict[str, object]:
@@ -116,11 +125,45 @@ def _resolve_task_id(output_dir: Path, task_id: str | None) -> str:
     return str(first["id"])
 
 
-def run_task(repo_url: str, task_id: str | None = None) -> str:
+def run_task(
+    repo_url: str,
+    task_id: str | None = None,
+    use_llm_discover: bool = False,
+    use_llm_plan: bool = False,
+    use_llm_patch: bool = False,
+    use_llm_apply: bool = False,
+    use_llm_validate: bool = False,
+    use_llm_pr_draft: bool = False,
+) -> str:
     steps_completed: list[str] = []
     artifacts: dict[str, str] = {}
     resolved_task_id = task_id or ""
     output_dir = Path("playground") / "outputs"
+
+    llm_steps_requested = {
+        "discover": use_llm_discover,
+        "plan": use_llm_plan,
+        "patch": use_llm_patch,
+        "apply": use_llm_apply,
+        "validate": use_llm_validate,
+        "pr_draft": use_llm_pr_draft,
+    }
+    llm_steps_used = {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
+    llm_steps_fallback = {
+        "discover": False,
+        "plan": False,
+        "patch": False,
+        "apply": False,
+        "validate": False,
+        "pr_draft": False,
+    }
 
     try:
         run_analyze_repo(repo_url)
@@ -129,31 +172,48 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
         artifacts["candidate_tasks_file"] = "playground/outputs/candidate_tasks.json"
         steps_completed.append("analyze")
 
+        if use_llm_discover:
+            discover_message = run_discover_tasks(repo_url, use_llm=True)
+            llm_steps_used["discover"] = _extract_used_llm_from_message(discover_message)
+            llm_steps_fallback["discover"] = _extract_llm_fallback_from_message(discover_message)
+            steps_completed.append("discover-tasks")
+
         resolved_task_id = _resolve_task_id(output_dir, task_id)
 
-        run_task_planning(resolved_task_id)
+        plan_message = run_task_planning(resolved_task_id, use_llm=use_llm_plan)
+        llm_steps_used["plan"] = _extract_used_llm_from_message(plan_message)
+        llm_steps_fallback["plan"] = _extract_llm_fallback_from_message(plan_message)
         artifacts["task_plan_file"] = "playground/outputs/task_plan.json"
         steps_completed.append("plan")
 
-        run_generate_patch(resolved_task_id)
+        patch_message = run_generate_patch(resolved_task_id, use_llm=use_llm_patch)
+        llm_steps_used["patch"] = _extract_used_llm_from_message(patch_message)
+        llm_steps_fallback["patch"] = _extract_llm_fallback_from_message(patch_message)
         artifacts["patch_preview_file"] = "playground/outputs/patch_preview.json"
         steps_completed.append("patch")
 
-        run_apply_patch(resolved_task_id)
+        apply_message = run_apply_patch(resolved_task_id, use_llm=use_llm_apply)
+        llm_steps_used["apply"] = _extract_used_llm_from_message(apply_message)
+        llm_steps_fallback["apply"] = _extract_llm_fallback_from_message(apply_message)
         artifacts["patch_apply_result_file"] = "playground/outputs/patch_apply_result.json"
         steps_completed.append("apply")
 
-        run_validate_patch(resolved_task_id)
+        validate_message = run_validate_patch(resolved_task_id, use_llm=use_llm_validate)
+        llm_steps_used["validate"] = _extract_used_llm_from_message(validate_message)
+        llm_steps_fallback["validate"] = _extract_llm_fallback_from_message(validate_message)
         artifacts["validation_result_file"] = "playground/outputs/validation_result.json"
         steps_completed.append("validate")
 
-        run_pr_draft(resolved_task_id)
+        pr_draft_message = run_pr_draft(resolved_task_id, use_llm=use_llm_pr_draft)
+        llm_steps_used["pr_draft"] = _extract_used_llm_from_message(pr_draft_message)
+        llm_steps_fallback["pr_draft"] = _extract_llm_fallback_from_message(pr_draft_message)
         artifacts["pr_draft_json"] = "playground/outputs/pr_draft.json"
         artifacts["pr_draft_md"] = "playground/outputs/pr_draft.md"
         steps_completed.append("pr-draft")
 
     except (
         AnalyzeInputError,
+        DiscoverTasksError,
         TaskPlanningError,
         PatchGenerationError,
         PatchApplyError,
@@ -174,6 +234,15 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
             "issue_context_used": context["issue_context_used"],
             "fallback_summary": context["fallback_summary"],
             "final_validation_passed": context["final_validation_passed"],
+            "llm_steps_requested": llm_steps_requested,
+            "llm_steps_used": llm_steps_used,
+            "llm_steps_fallback": llm_steps_fallback,
+            "final_discover_used_llm": llm_steps_used["discover"],
+            "final_plan_used_llm": llm_steps_used["plan"],
+            "final_patch_used_llm": llm_steps_used["patch"],
+            "final_apply_used_llm": llm_steps_used["apply"],
+            "final_validate_used_llm": llm_steps_used["validate"],
+            "final_pr_draft_used_llm": llm_steps_used["pr_draft"],
         }
         result_file = _write_run_task_result(result)
         raise RunTaskError(
@@ -194,11 +263,23 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
         "issue_context_used": context["issue_context_used"],
         "fallback_summary": context["fallback_summary"],
         "final_validation_passed": context["final_validation_passed"],
+        "llm_steps_requested": llm_steps_requested,
+        "llm_steps_used": llm_steps_used,
+        "llm_steps_fallback": llm_steps_fallback,
+        "final_discover_used_llm": llm_steps_used["discover"],
+        "final_plan_used_llm": llm_steps_used["plan"],
+        "final_patch_used_llm": llm_steps_used["patch"],
+        "final_apply_used_llm": llm_steps_used["apply"],
+        "final_validate_used_llm": llm_steps_used["validate"],
+        "final_pr_draft_used_llm": llm_steps_used["pr_draft"],
     }
     result_file = _write_run_task_result(result)
 
     issue_number_text = str(context["issue_number"]) if context["issue_number"] is not None else "none"
     fallback_summary_text = json.dumps(context["fallback_summary"], ensure_ascii=False)
+    llm_steps_requested_text = json.dumps(llm_steps_requested, ensure_ascii=False)
+    llm_steps_used_text = json.dumps(llm_steps_used, ensure_ascii=False)
+    llm_steps_fallback_text = json.dumps(llm_steps_fallback, ensure_ascii=False)
 
     return (
         "Run task completed.\n"
@@ -208,5 +289,8 @@ def run_task(repo_url: str, task_id: str | None = None) -> str:
         f"run_task_issue_context_used: {'true' if context['issue_context_used'] else 'false'}\n"
         f"run_task_issue_number: {issue_number_text}\n"
         f"run_task_fallback_summary: {fallback_summary_text}\n"
+        f"run_task_llm_steps_requested: {llm_steps_requested_text}\n"
+        f"run_task_llm_steps_used: {llm_steps_used_text}\n"
+        f"run_task_llm_steps_fallback: {llm_steps_fallback_text}\n"
         f"run_task_result_file: {result_file.as_posix()}"
     )

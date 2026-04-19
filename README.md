@@ -108,6 +108,20 @@ set RUN_LLM_INTEGRATION=1
 pytest -q -m llm_integration -o addopts=""
 ```
 
+运行一次真正的端到端 LLM 集成测试（run-task 多步骤编排）：
+
+```bash
+set RUN_LLM_INTEGRATION=1
+set LLM_API_KEY=your_real_key
+set LLM_BASE_URL=your_real_base_url
+set LLM_MODEL=your_real_model
+pytest -q -m llm_integration -o addopts="" tests/test_llm_integration.py -k run_task
+```
+
+说明：
+- 上述命令会执行 `run-task` 并开启 `--use-llm-discover`、`--use-llm-plan`、`--use-llm-patch`、`--use-llm-apply`、`--use-llm-validate`、`--use-llm-pr-draft`。
+- 建议在网络稳定、配额充足时运行，以减少因外部服务导致的波动。
+
 说明：
 - 默认 `pytest -q` 通过 `llm_integration` marker 隔离真实 LLM 测试。
 - 集成测试命令通过 `-o addopts=""` 覆盖默认筛选，确保只运行 `llm_integration` 测试。

@@ -69,3 +69,52 @@ def test_pr_draft_use_llm_real_integration(tmp_path: Path, monkeypatch) -> None:
     assert llm_file.read_text(encoding="utf-8").strip() != ""
     assert "used_llm: true" in result.stdout
     assert "fallback_triggered: false" in result.stdout
+
+
+def test_run_task_use_llm_real_integration(tmp_path: Path, monkeypatch) -> None:
+    _require_llm_integration_enabled()
+    _require_real_llm_env()
+
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "run-task",
+            "https://github.com/owner/repo",
+            "--use-llm-discover",
+            "--use-llm-plan",
+            "--use-llm-patch",
+            "--use-llm-apply",
+            "--use-llm-validate",
+            "--use-llm-pr-draft",
+        ],
+    )
+
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+    assert result.exit_code == 0
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["passed"] is True
+    assert payload["llm_steps_requested"] == {
+        "discover": True,
+        "plan": True,
+        "patch": True,
+        "apply": True,
+        "validate": True,
+        "pr_draft": True,
+    }
+    assert isinstance(payload["llm_steps_used"], dict)
+    assert isinstance(payload["llm_steps_fallback"], dict)
+    assert "final_discover_used_llm" in payload
+    assert "final_plan_used_llm" in payload
+    assert "final_patch_used_llm" in payload
+    assert "final_apply_used_llm" in payload
+    assert "final_validate_used_llm" in payload
+    assert "final_pr_draft_used_llm" in payload
+
+    assert "run_task_llm_steps_requested:" in result.stdout
+    assert "run_task_llm_steps_used:" in result.stdout
+    assert "run_task_llm_steps_fallback:" in result.stdout
