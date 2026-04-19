@@ -382,3 +382,154 @@ def test_validate_fails_when_workspace_file_missing(
 
     assert "Validation completed" in validate_result.stdout
     assert "status: failed" in validate_result.stdout
+
+
+def test_pr_draft_generates_json_and_markdown_for_valid_task_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+    assert runner.invoke(app, ["validate", task_id]).exit_code == 0
+
+    pr_result = runner.invoke(app, ["pr-draft", task_id])
+    pr_json = tmp_path / "playground" / "outputs" / "pr_draft.json"
+    pr_md = tmp_path / "playground" / "outputs" / "pr_draft.md"
+
+    assert pr_result.exit_code == 0
+    assert pr_json.exists()
+    assert pr_md.exists()
+
+    payload = json.loads(pr_json.read_text(encoding="utf-8"))
+    assert payload["task_id"] == task_id
+    assert "title" in payload
+    assert "summary" in payload
+    assert "changes" in payload
+    assert "validation" in payload
+    assert "risks" in payload
+    assert "status" in payload
+
+    markdown = pr_md.read_text(encoding="utf-8")
+    assert "# PR Draft" in markdown
+    assert task_id in markdown
+
+    assert "PR draft generated" in pr_result.stdout
+    assert "pr_draft.json" in pr_result.stdout
+    assert "pr_draft.md" in pr_result.stdout
+
+
+def test_pr_draft_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    assert runner.invoke(app, ["plan", task_id]).exit_code == 0
+    assert runner.invoke(app, ["patch", task_id]).exit_code == 0
+    assert runner.invoke(app, ["apply", task_id]).exit_code == 0
+    assert runner.invoke(app, ["validate", task_id]).exit_code == 0
+
+    result = runner.invoke(app, ["pr-draft", "non-existent-task-id"])
+
+    assert result.exit_code == 1
+    assert "Error:" in result.stdout
+    assert "task_id not found" in result.stdout
+    assert "Traceback" not in result.stdout
+
+
+def test_run_task_executes_full_pipeline_for_valid_input(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    repo_url = "https://github.com/owner/repo"
+    task_id = "repo-task-001"
+
+    result = runner.invoke(app, ["run-task", repo_url, task_id])
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+
+    assert result.exit_code == 0
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["repo_url"] == repo_url
+    assert payload["task_id"] == task_id
+    assert isinstance(payload["steps_completed"], list)
+    assert payload["steps_completed"] == [
+        "analyze",
+        "plan",
+        "patch",
+        "apply",
+        "validate",
+        "pr-draft",
+    ]
+    assert isinstance(payload["artifacts"], dict)
+    assert payload["passed"] is True
+    assert payload["status"] == "completed"
+    assert "summary" in payload
+
+    for artifact_path in payload["artifacts"].values():
+        assert (tmp_path / str(artifact_path)).exists()
+
+    assert "Run task completed" in result.stdout
+    assert "status: completed" in result.stdout
+    assert "run_task_result.json" in result.stdout
+
+
+def test_run_task_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["run-task", "https://github.com/owner/repo", "non-existent-task-id"],
+    )
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+
+    assert result.exit_code == 1
+    assert "Error:" in result.stdout
+    assert "task_id not found" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["passed"] is False
+    assert payload["status"] == "failed"
+    assert payload["steps_completed"] == ["analyze"]
+
+
+def test_run_task_stops_when_a_step_fails(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(
+        app,
+        ["run-task", "https://gitlab.com/owner/repo", "repo-task-001"],
+    )
+    run_task_file = tmp_path / "playground" / "outputs" / "run_task_result.json"
+
+    assert result.exit_code == 1
+    assert "Error:" in result.stdout
+    assert "Only GitHub URLs are supported" in result.stdout
+    assert "Traceback" not in result.stdout
+    assert run_task_file.exists()
+
+    payload = json.loads(run_task_file.read_text(encoding="utf-8"))
+    assert payload["repo_url"] == "https://gitlab.com/owner/repo"
+    assert payload["task_id"] == "repo-task-001"
+    assert payload["steps_completed"] == []
+    assert payload["passed"] is False
+    assert payload["status"] == "failed"

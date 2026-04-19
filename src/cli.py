@@ -5,6 +5,8 @@ import typer
 from .workflows.apply_patch import PatchApplyError, run_apply_patch
 from .workflows.analyze_repo import AnalyzeInputError, run_analyze_repo
 from .workflows.generate_patch import PatchGenerationError, run_generate_patch
+from .workflows.pr_draft import PRDraftError, run_pr_draft
+from .workflows.run_task import RunTaskError, run_task
 from .workflows.task_planning import TaskPlanningError, run_task_planning
 from .workflows.validate_patch import ValidationError, run_validate_patch
 
@@ -84,6 +86,35 @@ def validate(
     try:
         message = run_validate_patch(task_id)
     except ValidationError as exc:
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.echo(message)
+
+
+@app.command("pr-draft")
+def pr_draft(
+    task_id: str = typer.Argument(..., help="Task id from existing workflow artifacts."),
+) -> None:
+    """Generate minimal PR draft artifacts (JSON and Markdown)."""
+    try:
+        message = run_pr_draft(task_id)
+    except PRDraftError as exc:
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.echo(message)
+
+
+@app.command("run-task")
+def run_task_command(
+    repo_url: str = typer.Argument(..., help="Target GitHub repository URL."),
+    task_id: str = typer.Argument(..., help="Task id to run through all workflow steps."),
+) -> None:
+    """Run analyze->plan->patch->apply->validate->pr-draft end-to-end."""
+    try:
+        message = run_task(repo_url, task_id)
+    except RunTaskError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
 
