@@ -20,7 +20,6 @@
 ## 当前阶段不做什么
 
 - 不接入真实 GitHub Token
-- 不调用真实 LLM API
 - 不实现完整业务流程
 - 不做前端、部署、多用户系统
 
@@ -91,6 +90,16 @@ python -m src.main analyze https://github.com/owner/repo
 ```bash
 pytest
 ```
+
+运行 pytest 前必须提供真实 LLM 环境变量（覆盖 --use-llm 成功路径测试）：
+
+```bash
+set LLM_API_KEY=your_real_key
+set LLM_BASE_URL=your_real_base_url
+set LLM_MODEL=your_real_model
+```
+
+说明：默认测试会执行 `pr-draft --use-llm` 成功路径并真实调用 LLM；若环境变量缺失，测试会直接失败。
 
 ## 简短 Roadmap
 

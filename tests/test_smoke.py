@@ -1,3 +1,4 @@
+import os
 import json
 from pathlib import Path
 
@@ -21,6 +22,19 @@ def test_help_command_runs() -> None:
 
     assert result.exit_code == 0
     assert "analyze" in result.stdout
+
+
+def test_llm_test_prerequisites_are_documented() -> None:
+    env_example_text = Path(".env.example").read_text(encoding="utf-8")
+    readme_text = Path("README.md").read_text(encoding="utf-8")
+
+    required_note = "运行 pytest 前必须提供真实 LLM 环境变量"
+    assert required_note in env_example_text
+    assert "LLM_API_KEY" in env_example_text
+    assert "LLM_BASE_URL" in env_example_text
+    assert "LLM_MODEL" in env_example_text
+
+    assert required_note in readme_text
 
 
 def test_analyze_prepares_local_summary(tmp_path: Path, monkeypatch) -> None:
@@ -252,7 +266,80 @@ def test_analyze_rejects_invalid_urls(
     assert not (tmp_path / "playground" / "outputs").exists()
 
 
-def test_plan_generates_task_plan_for_valid_task_id(
+def test_plan_generates_issue_aware_task_plan_for_github_issue_source(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "dummy-token")
+
+    class DummyClient:
+        def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
+            return {
+                "full_name": f"{owner}/{repo}",
+                "description": "dummy repo",
+                "default_branch": "main",
+                "open_issues_count": 1,
+            }
+
+        def get_open_issues(
+            self,
+            owner: str,
+            repo: str,
+            limit: int = 3,
+        ) -> list[dict[str, object]]:
+            assert limit == 3
+            return [
+                {"number": 7, "title": "Fix flaky planner output", "state": "open"},
+            ]
+
+    monkeypatch.setattr(
+        "src.workflows.analyze_repo.GitHubClient.from_env",
+        lambda: DummyClient(),
+    )
+
+    analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
+    assert analyze_result.exit_code == 0
+
+    candidate_file = tmp_path / "playground" / "outputs" / "candidate_tasks.json"
+    candidate_data = json.loads(candidate_file.read_text(encoding="utf-8"))
+    task_id = candidate_data["tasks"][0]["id"]
+
+    plan_result = runner.invoke(app, ["plan", task_id])
+    task_plan_file = tmp_path / "playground" / "outputs" / "task_plan.json"
+
+    assert plan_result.exit_code == 0
+    assert task_plan_file.exists()
+
+    task_plan = json.loads(task_plan_file.read_text(encoding="utf-8"))
+    assert task_plan["task_id"] == task_id
+    assert task_plan["title"] == candidate_data["tasks"][0]["title"]
+    assert "goal" in task_plan
+    assert "issue #7" in task_plan["goal"].lower()
+    assert "proposed_changes" in task_plan
+    assert isinstance(task_plan["proposed_changes"], list)
+    assert len(task_plan["proposed_changes"]) > 0
+    assert "target_files" in task_plan
+    assert isinstance(task_plan["target_files"], list)
+    assert len(task_plan["target_files"]) > 0
+    assert "validation_steps" in task_plan
+    assert isinstance(task_plan["validation_steps"], list)
+    assert len(task_plan["validation_steps"]) > 0
+    assert "risk_level" in task_plan
+    assert "status" in task_plan
+    assert task_plan["status"] == "planned"
+    assert task_plan["source"] == "github_issue"
+    assert task_plan["issue_number"] == 7
+    assert task_plan["issue_context_used"] is True
+    assert task_plan["fallback_triggered"] is False
+
+    assert "Task plan generated" in plan_result.stdout
+    assert "task_plan_issue_context_used: true" in plan_result.stdout
+    assert "task_plan_fallback_triggered: false" in plan_result.stdout
+    assert "task_plan.json" in plan_result.stdout
+
+
+def test_plan_generates_template_fallback_for_non_issue_source(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -280,9 +367,15 @@ def test_plan_generates_task_plan_for_valid_task_id(
     assert "validation_steps" in task_plan
     assert "risk_level" in task_plan
     assert "status" in task_plan
+    assert task_plan["source"] == "template"
+    assert task_plan["issue_context_used"] is False
+    assert task_plan["fallback_triggered"] is True
+    assert ("issue_number" not in task_plan) or (task_plan["issue_number"] is None)
 
     assert "Task plan generated" in plan_result.stdout
-    assert "task_plan.json" in plan_result.stdout
+    assert "task_plan_issue_context_used: false" in plan_result.stdout
+    assert "task_plan_fallback_triggered: true" in plan_result.stdout
+    assert "task_plan_file:" in plan_result.stdout
 
 
 def test_plan_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
@@ -588,11 +681,18 @@ def test_pr_draft_rejects_invalid_task_id(tmp_path: Path, monkeypatch) -> None:
     assert "Traceback" not in result.stdout
 
 
-def test_pr_draft_use_llm_falls_back_when_llm_call_fails(
+def test_pr_draft_use_llm_falls_back_when_real_llm_request_fails(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
+
+    required_envs = ["LLM_API_KEY", "LLM_BASE_URL", "LLM_MODEL"]
+    missing = [name for name in required_envs if not os.getenv(name, "").strip()]
+    assert not missing, (
+        "Missing required real LLM env vars before pytest: "
+        + ", ".join(missing)
+    )
 
     analyze_result = runner.invoke(app, ["analyze", "https://github.com/owner/repo"])
     assert analyze_result.exit_code == 0
@@ -606,18 +706,9 @@ def test_pr_draft_use_llm_falls_back_when_llm_call_fails(
     assert runner.invoke(app, ["apply", task_id]).exit_code == 0
     assert runner.invoke(app, ["validate", task_id]).exit_code == 0
 
-    monkeypatch.setenv("LLM_API_KEY", "dummy")
-    monkeypatch.setenv("LLM_BASE_URL", "https://example.com/v1")
-    monkeypatch.setenv("LLM_MODEL", "dummy-model")
-
-    def _raise_llm_error(*args, **kwargs):
-        raise RuntimeError("llm failure")
-
-    monkeypatch.setattr(
-        "src.llm_client.LLMClient.generate_pr_draft",
-        _raise_llm_error,
-        raising=False,
-    )
+    monkeypatch.setenv("LLM_API_KEY", os.getenv("LLM_API_KEY", "").strip())
+    monkeypatch.setenv("LLM_MODEL", os.getenv("LLM_MODEL", "").strip())
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:9/v1")
 
     result = runner.invoke(app, ["pr-draft", task_id, "--use-llm"])
     pr_json = tmp_path / "playground" / "outputs" / "pr_draft.json"
@@ -626,11 +717,13 @@ def test_pr_draft_use_llm_falls_back_when_llm_call_fails(
 
     assert result.exit_code == 0
     assert pr_json.exists()
+    assert pr_json.read_text(encoding="utf-8").strip() != ""
     assert pr_md.exists()
+    assert pr_md.read_text(encoding="utf-8").strip() != ""
     assert not pr_llm_md.exists()
     assert "used_llm: false" in result.stdout
     assert "fallback_triggered: true" in result.stdout
-    assert "llm failure" in result.stdout
+    assert "fallback_reason:" in result.stdout
 
 
 def test_run_task_executes_full_pipeline_for_valid_input(
