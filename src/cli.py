@@ -14,7 +14,7 @@ app = typer.Typer(
 def analyze(
     repo_url: str = typer.Argument(..., help="Target GitHub repository URL."),
 ) -> None:
-    """Analyze a repository with a placeholder workflow."""
+    """Prepare local analysis artifacts for a target repository."""
     message = run_analyze_repo(repo_url)
     typer.echo(message)
 
