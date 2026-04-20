@@ -33,15 +33,27 @@ class GitHubClient:
         base_url = os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").strip()
         return cls(token=token, base_url=base_url)
 
-    def _get_json(self, url: str) -> object:
+    def _request_json(
+        self,
+        url: str,
+        *,
+        method: str,
+        payload: dict[str, object] | None = None,
+    ) -> object:
+        body = None
+        if payload is not None:
+            body = json.dumps(payload).encode("utf-8")
+
         request = Request(
             url=url,
-            method="GET",
+            data=body,
+            method=method,
             headers={
                 "Authorization": f"Bearer {self.token}",
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": "2022-11-28",
                 "User-Agent": "github-agent-lab",
+                "Content-Type": "application/json",
             },
         )
 
@@ -59,6 +71,9 @@ class GitHubClient:
             return json.loads(response_body)
         except json.JSONDecodeError as exc:
             raise GitHubClientError("GitHub response format is invalid") from exc
+
+    def _get_json(self, url: str) -> object:
+        return self._request_json(url, method="GET")
 
     def get_repo_metadata(self, owner: str, repo: str) -> dict[str, object]:
         payload = self._get_json(f"{self.base_url}/repos/{owner}/{repo}")
@@ -95,3 +110,45 @@ class GitHubClient:
                 break
 
         return issues
+
+    def create_draft_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+    ) -> dict[str, object]:
+        if not title.strip():
+            raise GitHubClientError("Draft PR title must not be empty")
+        if not head.strip() or not base.strip():
+            raise GitHubClientError("Draft PR head/base must not be empty")
+
+        payload = self._request_json(
+            f"{self.base_url}/repos/{owner}/{repo}/pulls",
+            method="POST",
+            payload={
+                "title": title,
+                "body": body,
+                "head": head,
+                "base": base,
+                "draft": True,
+            },
+        )
+
+        if not isinstance(payload, dict):
+            raise GitHubClientError("GitHub pull request payload is invalid")
+
+        number_raw = payload.get("number")
+        html_url_raw = payload.get("html_url")
+        if not isinstance(number_raw, int):
+            raise GitHubClientError("GitHub pull request payload is invalid")
+        if not isinstance(html_url_raw, str) or not html_url_raw.strip():
+            raise GitHubClientError("GitHub pull request payload is invalid")
+
+        return {
+            "number": number_raw,
+            "url": html_url_raw.strip(),
+            "state": str(payload.get("state", "")),
+        }

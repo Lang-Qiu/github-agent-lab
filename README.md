@@ -19,9 +19,9 @@
 
 ## 当前阶段不做什么
 
-- 不接入真实 GitHub Token
 - 不实现完整业务流程
 - 不做前端、部署、多用户系统
+- 不做 auto-merge、自动 reviewer 分配、自动 issue/comment 发布
 
 ## 目录结构
 
@@ -91,12 +91,38 @@ python -m src.main analyze https://github.com/owner/repo
 pytest -q
 ```
 
+6. 显式执行 publish（不会在 run-task 中自动触发）
+
+```bash
+python -m src.main publish https://github.com/owner/repo --branch feature/repo-task-001 --draft-pr
+```
+
+## Publish 闭环
+
+publish 命令会在本地工作流产物基础上执行最小发布闭环：
+
+- 创建/切换功能分支
+- `git add` + `git commit`
+- `git push` 到远端
+- 创建 draft PR
+- 落盘 `playground/outputs/publish_result.json`
+
+安全边界：
+
+- 必须显式执行 `publish`，不会在 `run-task` 中隐式发布
+- 默认保护 `main/master`，禁止直接发布到受保护分支
+- publish 失败时会保留本地提交结果并输出清晰错误，不做自动 merge
+
 运行 llm_integration 测试前必须提供真实 LLM 环境变量：
 
 ```bash
 set LLM_API_KEY=your_real_key
 set LLM_BASE_URL=your_real_base_url
 set LLM_MODEL=your_real_model
+set LLM_TIMEOUT_SECONDS=120
+set LLM_MAX_RETRIES=1
+set LLM_RETRY_BACKOFF_BASE_SECONDS=1.0
+set LLM_USE_STREAM=1
 ```
 
 默认回归测试不依赖真实 LLM 环境变量。
@@ -115,6 +141,10 @@ set RUN_LLM_INTEGRATION=1
 set LLM_API_KEY=your_real_key
 set LLM_BASE_URL=your_real_base_url
 set LLM_MODEL=your_real_model
+set LLM_TIMEOUT_SECONDS=120
+set LLM_MAX_RETRIES=1
+set LLM_RETRY_BACKOFF_BASE_SECONDS=1.0
+set LLM_USE_STREAM=1
 pytest -q -m llm_integration -o addopts="" tests/test_llm_integration.py -k run_task
 ```
 
@@ -122,9 +152,26 @@ pytest -q -m llm_integration -o addopts="" tests/test_llm_integration.py -k run_
 - 上述命令会执行 `run-task` 并开启 `--use-llm-discover`、`--use-llm-plan`、`--use-llm-patch`、`--use-llm-apply`、`--use-llm-validate`、`--use-llm-pr-draft`。
 - 建议在网络稳定、配额充足时运行，以减少因外部服务导致的波动。
 
+建议做一次超时对照（120 vs 180）：
+
+```bash
+set LLM_TIMEOUT_SECONDS=120
+pytest -q -m llm_integration -o addopts="" tests/test_llm_integration.py -k run_task
+
+set LLM_TIMEOUT_SECONDS=180
+pytest -q -m llm_integration -o addopts="" tests/test_llm_integration.py -k run_task
+```
+
+对照时重点查看 `playground/outputs/run_task_result.json` 中的 `llm_steps_used` 与 `llm_steps_fallback`。
+
 说明：
 - 默认 `pytest -q` 通过 `llm_integration` marker 隔离真实 LLM 测试。
 - 集成测试命令通过 `-o addopts=""` 覆盖默认筛选，确保只运行 `llm_integration` 测试。
+
+publish 相关测试分层：
+
+- 默认 `pytest -q` 仅运行 mock/monkeypatch 的 publish 测试，不依赖真实 GitHub 写入。
+- 如需真实 GitHub 写入 integration 测试，请单独在受控环境执行并显式设置真实 `GITHUB_TOKEN`。
 
 ## 简短 Roadmap
 

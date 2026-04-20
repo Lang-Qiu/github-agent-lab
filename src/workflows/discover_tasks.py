@@ -208,13 +208,22 @@ def _normalize_llm_tasks(tasks_raw: object, repo: str) -> list[dict[str, object]
         else:
             source = "github_issue" if issue_number is not None else "template"
 
+        canonical_issue_id = (
+            f"{repo}-issue-{issue_number}" if issue_number is not None else ""
+        )
+        canonical_task_id = f"{repo}-task-{index:03d}"
+
         task_id_raw = str(item.get("id", "")).strip()
-        if task_id_raw:
-            task_id = task_id_raw
-        elif source == "github_issue" and issue_number is not None:
-            task_id = f"{repo}-issue-{issue_number}"
+        if source == "github_issue" and issue_number is not None:
+            if task_id_raw.startswith(f"{repo}-issue-"):
+                task_id = task_id_raw
+            else:
+                task_id = canonical_issue_id
         else:
-            task_id = f"{repo}-task-{index:03d}"
+            if task_id_raw.startswith(f"{repo}-task-"):
+                task_id = task_id_raw
+            else:
+                task_id = canonical_task_id
 
         priority = str(item.get("priority", "")).strip().lower()
         if priority not in {"low", "medium", "high"}:

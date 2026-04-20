@@ -9,6 +9,7 @@ from .workflows.analyze_repo import AnalyzeInputError, run_analyze_repo
 from .workflows.discover_tasks import DiscoverTasksError, run_discover_tasks
 from .workflows.generate_patch import PatchGenerationError, run_generate_patch
 from .workflows.pr_draft import PRDraftError, run_pr_draft
+from .workflows.publish_result import PublishResultError, run_publish
 from .workflows.run_task import RunTaskError, run_task
 from .workflows.task_planning import TaskPlanningError, run_task_planning
 from .workflows.validate_patch import ValidationError, run_validate_patch
@@ -204,6 +205,46 @@ def run_task_command(
             use_llm_pr_draft=use_llm_pr_draft,
         )
     except RunTaskError as exc:
+        typer.echo(f"Error: {exc}")
+        raise typer.Exit(code=1)
+
+    typer.echo(message)
+
+
+@app.command("publish")
+def publish_command(
+    repo_url: str = typer.Argument(..., help="Target GitHub repository URL."),
+    task_id: Optional[str] = typer.Option(
+        None,
+        "--task-id",
+        help="Optional task id. If omitted, publish resolves from local artifacts.",
+    ),
+    branch_name: Optional[str] = typer.Option(
+        None,
+        "--branch",
+        help="Feature branch name for publish. Defaults to publish/<task_id>.",
+    ),
+    draft_pr: bool = typer.Option(
+        False,
+        "--draft-pr",
+        help="Create a draft pull request after push.",
+    ),
+    base_branch: str = typer.Option(
+        "main",
+        "--base-branch",
+        help="Base branch for draft PR creation.",
+    ),
+) -> None:
+    """Publish local contribution result to GitHub by explicit command."""
+    try:
+        message = run_publish(
+            repo_url=repo_url,
+            task_id=task_id,
+            branch_name=branch_name,
+            draft_pr=draft_pr,
+            base_branch=base_branch,
+        )
+    except PublishResultError as exc:
         typer.echo(f"Error: {exc}")
         raise typer.Exit(code=1)
 
